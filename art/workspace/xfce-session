@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+set -eu
+
+set_setting() {
+    xfconf-query -c "$1" -p "$2" -n -t "$3" -s "$4"
+}
+set_setting xfwm4 /general/use_compositing bool false
+if [[ ! -f "$HOME/.config/mrp-appearance-v1" ]]; then
+    set_setting xsettings /Net/ThemeName string Adwaita-dark
+    set_setting xsettings /Net/IconThemeName string Papirus-Dark
+    set_setting xsettings /Gtk/FontName string 'DejaVu Sans 10'
+    set_setting xsettings /Gtk/MonospaceFontName string 'DejaVu Sans Mono 10'
+    for monitor in VNC-0 VNC-1 VNC-2; do
+        for workspace in 0 1 2 3; do
+            background="/backdrop/screen0/monitor$monitor/workspace$workspace"
+            set_setting xfce4-desktop "$background/last-image" string /opt/mr-president/wallpaper.png
+            set_setting xfce4-desktop "$background/image-style" int 5
+        done
+    done
+    install -d "$HOME/.config/xfce4/terminal"
+    terminal="$HOME/.config/xfce4/terminal/terminalrc"
+    if [[ ! -e $terminal ]]; then
+        cat > "$terminal" <<'TERMINAL'
+[Configuration]
+FontName=DejaVu Sans Mono 11
+ColorForeground=#e2eaf5
+ColorBackground=#101725
+ColorPalette=#182332;#f27888;#a7d997;#f1c47c;#7fb4ed;#c2a4ec;#77d3da;#d9e5f3;#546681;#ff94a1;#b7e8a7;#ffd499;#a3c9f4;#d7bdf7;#9be6ec;#ffffff
+MiscCursorShape=TERMINAL_CURSOR_SHAPE_IBEAM
+TERMINAL
+    fi
+    panel_config="$HOME/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml"
+    if [[ ! -e $panel_config ]]; then
+        install -D /etc/xdg/xfce4/panel/default.xml "$panel_config"
+        set_setting xfce4-panel /panels/panel-1/output-name string VNC-1
+        set_setting xfce4-panel /panels/panel-1/size uint 36
+        set_setting xfce4-panel /panels/panel-2/output-name string VNC-1
+        set_setting xfce4-panel /panels/panel-2/autohide-behavior uint 0
+        set_setting xfce4-panel /panels/panel-2/size uint 50
+    fi
+    # TigerVNC adds the other monitors as the client connects.
+    set_setting displays /Notify int 0
+    touch "$HOME/.config/mrp-appearance-v1"
+fi
+exec xfce4-session

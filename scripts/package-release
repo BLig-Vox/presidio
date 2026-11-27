@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
+target=x86_64-unknown-linux-gnu
+version=$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml)
+cargo build --locked --release --target "$target"
+mkdir -p dist
+
+binary="target/$target/release"
+tar -czf "dist/presidio-$target-v$version.tgz" -C "$binary" presidio
+
+if [[ ${1:-} == --workspace ]]; then
+    runtime=runtime/linux-x86_64
+    payload="$runtime/arch-xfce.oci.tar"
+    [[ -r $payload ]] || payload="$runtime/arch-xfce.url"
+    tar -cf - -C "$binary" presidio -C "$PWD" scripts/arch-oci art/workspace \
+        "$runtime/crun" "$runtime/umoci" "$runtime/arch-xfce.sha256" "$payload" |
+        gzip -1 > "dist/presidio-workspace-$target-v$version.tgz"
+fi

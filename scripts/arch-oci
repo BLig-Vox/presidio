@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+if [[ ${1:-} != "" && ${1:-} != --launch ]] || (( $# > 1 )); then
+    echo "Usage: scripts/arch-oci [--launch]" >&2
+    exit 2
+fi
+
+project=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+runtime="$project/runtime/linux-x86_64"
+data=${XDG_DATA_HOME:-"$HOME/.local/share"}
+default_state="$data/presidio/arch-workspace"
+legacy_state="$data/mr-president/arch-workspace"
+if [[ ! -d $default_state && -d $legacy_state ]]; then
+    default_state=$legacy_state
+fi
+state=${MRP_WORKSPACE_STATE:-$default_state}
+image="$runtime/arch-xfce.oci.tar"
+cd "$runtime"
+read -r digest _ < arch-xfce.sha256
+[[ $digest =~ ^[0-9a-f]{64}$ ]] || { echo "Invalid workspace image digest" >&2; exit 1; }
+install -d -m 700 "$state" "$state/home" "$state/run"
+state=$(cd -- "$state" && pwd -P)
+exec 9>"$state/workspace.lock"
+flock -n 9 || { echo "Workspace is already running" >&2; exit 1; }
+
+bundle="$state/oci-$digest"
+if [[ ! -d $bundle ]]; then
+    echo "Preparing Arch workspace (first launch only)…" >&2
+    stage=$(mktemp -d "$state/.oci.XXXXXX")
+    trap 'rm -rf -- "$stage"' EXIT
+    if [[ ! -f $image ]]; then
+        [[ -r arch-xfce.url ]] || { echo "Bundled workspace image is missing" >&2; exit 1; }
+        read -r url < arch-xfce.url
+        curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+            --retry 2 --output "$stage/workspace.tar" "$url"
+        image="$stage/workspace.tar"
+    fi
+    actual=$(sha256sum < "$image")
+    [[ ${actual%% *} == "$digest" ]] || { echo "Workspace image digest mismatch" >&2; exit 1; }
+    mkdir "$stage/image"
+    tar -xf "$image" -C "$stage/image"
+    "$runtime/umoci" unpack --rootless --image "$stage/image:workspace" "$stage/bundle"
+    mv -T -- "$stage/bundle" "$bundle"
+    rm -rf -- "$stage"
+    trap - EXIT
+fi
+
+json_path() {
+    local value=$1
+    [[ ! $value =~ [[:cntrl:]] ]] || { echo "Unsupported workspace path" >&2; return 1; }
+    value=${value//\\/\\\\}
+    printf '"%s"' "${value//\"/\\\"}"
+}
+home=$(json_path "$state/home")
+run=$(json_path "$state/run")
+assets=$(json_path "$project/art/workspace")
+proc='{"destination":"/proc","type":"proc","source":"proc","options":["nosuid","nodev","noexec"]}'
+desktop_env=''
+if [[ ${MRP_NESTED_PROC:-0} == 1 ]]; then
+    # The curated workspace can use the outer procfs read-only on nested hosts.
+    # Its PID numbers do not match the inner namespace; glycin's secondary
+    # sandbox cannot start here. Keep the outer OCI isolation in place.
+    desktop_env=',"GLYCIN_DISABLE_SANDBOX=i-know-the-risks"'
+    proc='{"destination":"/proc","type":"bind","source":"/proc","options":["rbind","ro","nosuid","nodev","noexec"]}'
+fi
+
+rm -f -- "$state/run/vnc.sock"
+cat > "$bundle/config.json" <<JSON
+{
+ "ociVersion":"1.0.2",
+ "root":{"path":"rootfs","readonly":true},
+ "process":{
+  "terminal":false,"user":{"uid":0,"gid":0},"cwd":"/root",
+  "args":["/opt/mr-president/session"],
+  "env":["PATH=/usr/bin","HOME=/root","USER=root","LOGNAME=root","LANG=C.UTF-8","DISPLAY=:47","XAUTHORITY=/tmp/Xauthority","XDG_RUNTIME_DIR=/run/workspace"$desktop_env],
+  "noNewPrivileges":true
+ },
+ "mounts":[
+  $proc,
+  {"destination":"/dev","type":"tmpfs","source":"tmpfs","options":["nosuid","mode=755","size=65536k"]},
+  {"destination":"/dev/pts","type":"devpts","source":"devpts","options":["newinstance","nosuid","noexec","ptmxmode=0666","mode=0620"]},
+  {"destination":"/dev/shm","type":"tmpfs","source":"shm","options":["nosuid","nodev","noexec","mode=1777","size=128m"]},
+  {"destination":"/tmp","type":"tmpfs","source":"tmpfs","options":["nosuid","nodev","mode=1777"]},
+  {"destination":"/root","type":"bind","source":$home,"options":["bind","rw","nosuid","nodev"]},
+  {"destination":"/run/workspace","type":"bind","source":$run,"options":["bind","rw","nosuid","nodev"]},
+  {"destination":"/opt/mr-president","type":"bind","source":$assets,"options":["bind","ro","nosuid","nodev"]},
+  {"destination":"/etc/resolv.conf","type":"bind","source":"/etc/resolv.conf","options":["bind","ro","nosuid","nodev","noexec"]}
+ ],
+ "linux":{
+  "uidMappings":[{"containerID":0,"hostID":$(id -u),"size":1}],
+  "gidMappings":[{"containerID":0,"hostID":$(id -g),"size":1}],
+  "namespaces":[{"type":"user"},{"type":"mount"},{"type":"pid"},{"type":"ipc"},{"type":"uts"}]
+ }
+}
+JSON
+
+crun=("$runtime/crun" --cgroup-manager disabled --root "$state/instances")
+if [[ ${1:-} != --launch ]]; then
+    exec "${crun[@]}" run --bundle "$bundle" desktop
+fi
+
+client=${MRP_CLIENT:-"$project/presidio"}
+if [[ ! -x $client ]]; then
+    client="$project/target/debug/presidio"
+fi
+[[ -x $client ]] || { echo "Presidio binary not found" >&2; exit 1; }
+
+"${crun[@]}" run --bundle "$bundle" desktop &
+server=$!
+stop() {
+    "${crun[@]}" kill --all desktop TERM >/dev/null 2>&1 || true
+    for ((attempt=0; attempt<20; attempt++)); do
+        kill -0 "$server" 2>/dev/null || break
+        sleep .1
+    done
+    "${crun[@]}" kill --all desktop KILL >/dev/null 2>&1 || kill "$server" 2>/dev/null || true
+    wait "$server" 2>/dev/null || true
+    rm -f -- "$state/run/vnc.sock"
+}
+trap stop EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+for ((attempt=0; attempt<150; attempt++)); do
+    if [[ -S $state/run/vnc.sock ]]; then
+        cd "$project"
+        "$client" --vnc "unix:$state/run/vnc.sock" --request-triple-layout
+        exit
+    fi
+    kill -0 "$server" 2>/dev/null || { wait "$server"; exit 1; }
+    sleep .1
+done
+echo "Workspace VNC did not start" >&2
+exit 1

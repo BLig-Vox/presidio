@@ -1,0 +1,6 @@
+/target/
+/dist/
+/runtime/
+/art/*
+!/art/workspace/
+!/art/streamer-desk-pov-closer.mp4

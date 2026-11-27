@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+project=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+runtime="$project/runtime/linux-x86_64"
+rootfs=$(cd -- "${1:?Usage: pack-workspace-image PATH_TO_ARCH_ROOTFS}" && pwd -P)
+[[ $rootfs != / && -x $rootfs/usr/bin/Xvnc && -x $rootfs/usr/bin/xfce4-session ]] || {
+    echo "Expected a separate Arch rootfs containing TigerVNC and XFCE" >&2
+    exit 1
+}
+stage=$(mktemp -d "$runtime/.pack.XXXXXX")
+trap 'rm -rf -- "$stage"' EXIT
+
+sudo install -d -m 755 "$rootfs/opt/mr-president" "$rootfs/run/workspace"
+sudo install -m 755 "$project/art/workspace/"{session,xfce-session} "$rootfs/opt/mr-president/"
+sudo install -m 644 "$project/art/workspace/wallpaper.svg" "$rootfs/opt/mr-president/"
+# Retain the package database, but ship neither the builder's DNS nor its machine identity.
+sudo install -m 644 /dev/null "$rootfs/etc/resolv.conf"
+if [[ ! -s $rootfs/etc/machine-id ]]; then
+    dbus-uuidgen | sudo tee "$rootfs/etc/machine-id" >/dev/null
+fi
+
+umoci="$runtime/umoci"
+"$umoci" init --layout "$stage/layout"
+"$umoci" new --image "$stage/layout:workspace"
+sudo tar --numeric-owner -C "$rootfs" --exclude=./var/cache/pacman/pkg -cf - . > "$stage/layer.tar"
+"$umoci" raw add-layer --image "$stage/layout:workspace" "$stage/layer.tar"
+"$umoci" config --image "$stage/layout:workspace" --config.cmd /opt/mr-president/session
+tar -C "$stage/layout" -cf "$stage/arch-xfce.oci.tar" oci-layout index.json blobs
+(cd "$stage" && sha256sum arch-xfce.oci.tar > arch-xfce.sha256)
+mv -f -- "$stage/arch-xfce.oci.tar" "$stage/arch-xfce.sha256" "$runtime/"

@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+state=${XDG_DATA_HOME:-"$HOME/.local/share"}/mr-president/workspace
+install -d -m 700 "$state" "$state/home" "$state/run"
+exec 9>"$state/workspace.lock"
+flock -n 9 || { echo "Workspace is already running" >&2; exit 1; }
+rm -f "$state/run/vnc.sock"
+
+# Share the installed Arch packages read-only; only the workspace home persists.
+bwrap --unshare-user --unshare-ipc --unshare-uts \
+    --die-with-parent --new-session --clearenv \
+    --ro-bind /usr /usr --symlink usr/bin /bin --symlink usr/lib /lib \
+    --symlink usr/lib /lib64 --ro-bind /etc /etc --bind /proc /proc --ro-bind /proc/sys /proc/sys \
+    --dev /dev --tmpfs /tmp --dir /tmp/.X11-unix \
+    --bind "$state/home" "$HOME" --bind "$state/run" /run/workspace \
+    --setenv HOME "$HOME" --setenv USER "$(id -un)" \
+    --setenv PATH /usr/bin --setenv DISPLAY :43 --setenv LANG C.UTF-8 \
+    --setenv XAUTHORITY /tmp/Xauthority --setenv XDG_RUNTIME_DIR /run/workspace \
+    --chdir "$HOME" /bin/bash -euc '
+        umask 077
+        touch "$XAUTHORITY"
+        xauth add "$DISPLAY" . "$(mcookie)"
+        Xvnc "$DISPLAY" -auth "$XAUTHORITY" -nolisten tcp -rfbport -1 \
+            -rfbunixpath /run/workspace/vnc.sock -rfbunixmode 0600 \
+            -SecurityTypes None -geometry 1920x1080 -depth 24 &
+        server=$!
+        trap "kill $server 2>/dev/null || true" EXIT
+        for ((attempt=0; attempt < 50; attempt++)); do
+            [[ -S /run/workspace/vnc.sock && -S /tmp/.X11-unix/X43 ]] && break
+            kill -0 "$server"
+            sleep 0.1
+        done
+        [[ -S /run/workspace/vnc.sock && -S /tmp/.X11-unix/X43 ]]
+        dbus-run-session -- bash -ec "
+            xfconf-query -c xfwm4 -p /general/use_compositing --create --type bool --set false
+            exec xfce4-session
+        "
+    '

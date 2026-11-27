@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+
+mkdir -m 1777 /tmp/.X11-unix
+touch "$XAUTHORITY"
+xauth add "$DISPLAY" . "$(mcookie)"
+Xvnc "$DISPLAY" -auth "$XAUTHORITY" -nolisten tcp -rfbport -1 \
+    -rfbunixpath /run/workspace/vnc.sock -rfbunixmode 0600 \
+    -SecurityTypes None -geometry 1920x1080 -depth 24 &
+server=$!
+trap 'kill "$server" 2>/dev/null || true' EXIT
+for ((attempt=0; attempt<100; attempt++)); do
+    [[ -S /run/workspace/vnc.sock && -S "/tmp/.X11-unix/X${DISPLAY#:}" ]] && break
+    kill -0 "$server"
+    sleep .1
+done
+[[ -S /run/workspace/vnc.sock && -S "/tmp/.X11-unix/X${DISPLAY#:}" ]]
+dbus-run-session -- /opt/mr-president/xfce-session

@@ -1,0 +1,17 @@
+[package]
+name = "presidio"
+description = "A 3D pocket workspace for live desktop displays"
+repository = "https://github.com/alexander-vox/presidio"
+readme = "README.md"
+include = ["src/**", "assets/**", "README.md", "WORKSPACE.md"]
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+macroquad = "0.4"
+
+[package.metadata.binstall]
+pkg-url = "{repo}/releases/download/v{version}/{name}-{target}-v{version}{archive-suffix}"
+pkg-fmt = "tgz"
+bin-dir = "{bin}{binary-ext}"
+disabled-strategies = ["quick-install", "compile"]
