@@ -13,7 +13,7 @@ trap 'rm -rf -- "$stage"' EXIT
 
 sudo install -d -m 755 "$rootfs/opt/mr-president" "$rootfs/run/workspace"
 sudo install -m 755 "$project/art/workspace/"{session,xfce-session} "$rootfs/opt/mr-president/"
-sudo install -m 644 "$project/art/workspace/wallpaper.svg" "$rootfs/opt/mr-president/"
+sudo install -m 644 "$project/art/workspace/"{wallpaper.svg,pacman.conf} "$rootfs/opt/mr-president/"
 # Retain the package database, but ship neither the builder's DNS nor its machine identity.
 sudo install -m 644 /dev/null "$rootfs/etc/resolv.conf"
 if [[ ! -s $rootfs/etc/machine-id ]]; then

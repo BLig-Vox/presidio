@@ -2,6 +2,18 @@
 set -euo pipefail
 umask 077
 
+prepare_pacman() {
+    local pending=/var/lib/pacman/.presidio-keyring-pending
+    if [[ ! -e /etc/pacman.conf ]]; then
+        install -m 644 /opt/mr-president/pacman.conf /etc/pacman.conf || return
+    fi
+    # Keep an existing keyring, and retry if initialization did not finish.
+    if [[ ! -s /etc/pacman.d/gnupg/pubring.gpg || -e $pending ]]; then
+        touch "$pending" && pacman-key --init && pacman-key --populate archlinux && rm "$pending"
+    fi
+}
+prepare_pacman || echo "Could not prepare the workspace package manager." >&2
+
 mkdir -m 1777 /tmp/.X11-unix
 touch "$XAUTHORITY"
 xauth add "$DISPLAY" . "$(mcookie)"

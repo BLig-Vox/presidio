@@ -80,7 +80,7 @@ rm -f -- "$state/run/vnc.sock"
 cat > "$bundle/config.json" <<JSON
 {
  "ociVersion":"1.0.2",
- "root":{"path":"rootfs","readonly":true},
+ "root":{"path":"rootfs","readonly":false},
  "process":{
   "terminal":false,"user":{"uid":0,"gid":0},"cwd":"/root",
   "args":["/opt/mr-president/session"],
