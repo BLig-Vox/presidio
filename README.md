@@ -10,7 +10,9 @@ Presidio is a Rust desktop app. On Linux x86-64, the full workspace bundle runs 
 
 ## Quick start
 
-**App only:** Once the crate and Linux x86-64 release asset are published:
+**App only:** Download the Linux x86-64 archive from the [GitHub release](https://github.com/alexander-vox/presidio/releases/latest). Extract it to a permanent directory, then run `./presidio --desktop`.
+
+Alternatively, once the crate is available on crates.io:
 
 ```sh
 cargo binstall presidio
@@ -23,7 +25,7 @@ Open **Presidio** from your applications menu. The standalone app shows the 3D d
 presidio --vnc 127.0.0.1:5900 --request-triple-layout
 ```
 
-**Full Arch/Xfce workspace:** Extract the separate workspace bundle to a permanent directory, then run:
+**Full Arch/Xfce workspace:** Download the workspace archive from the same release and extract it to a permanent directory, then run:
 
 ```sh
 ./presidio --desktop
