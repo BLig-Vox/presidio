@@ -1,3 +1,4 @@
+mod capture;
 mod vnc;
 
 use macroquad::{
@@ -331,6 +332,104 @@ fn draw_focused(texture: &Texture2D, source: Rect, aspect: f32) {
     );
 }
 
+#[derive(Default)]
+struct CapturePrompt {
+    pressed: Option<bool>,
+}
+
+impl CapturePrompt {
+    fn buttons() -> (Rect, Rect, Rect) {
+        let width = (screen_width() - 24.).clamp(1., 418.);
+        let panel = Rect::new(
+            (screen_width() - width) / 2.,
+            (screen_height() - 154.) / 2.,
+            width,
+            154.,
+        );
+        let yes = Rect::new(panel.x + panel.w - 152., panel.y + 98., 132., 36.);
+        let cancel = Rect::new(yes.x - 102., yes.y, 92., yes.h);
+        (panel, yes, cancel)
+    }
+
+    fn response(&mut self, clicks: &[(MouseButton, bool, f32, f32)]) -> Option<bool> {
+        if is_key_pressed(KeyCode::Escape) {
+            return Some(false);
+        }
+        if is_key_released(KeyCode::Enter) || is_key_released(KeyCode::KpEnter) {
+            return Some(true);
+        }
+        let (_, yes, cancel) = Self::buttons();
+        let scale = screen_dpi_scale();
+        for &(button, down, x, y) in clicks {
+            if button != MouseButton::Left {
+                continue;
+            }
+            let position = vec2(x / scale, y / scale);
+            let choice = yes
+                .contains(position)
+                .then_some(true)
+                .or_else(|| cancel.contains(position).then_some(false));
+            if down {
+                self.pressed = choice;
+            } else if self
+                .pressed
+                .take()
+                .is_some_and(|pressed| Some(pressed) == choice)
+            {
+                return choice;
+            }
+        }
+        None
+    }
+
+    fn draw(&self) {
+        let (panel, yes, cancel) = Self::buttons();
+        draw_rectangle(
+            0.,
+            0.,
+            screen_width(),
+            screen_height(),
+            Color::new(0., 0., 0., 0.58),
+        );
+        draw_rectangle(panel.x, panel.y, panel.w, panel.h, rgb(24, 25, 31));
+        draw_text(
+            "Capture keyboard and mouse?",
+            panel.x + 20.,
+            panel.y + 37.,
+            25.,
+            WHITE,
+        );
+        draw_text(
+            "Press Super + Esc to return input to the host.",
+            panel.x + 20.,
+            panel.y + 66.,
+            18.,
+            LIGHTGRAY,
+        );
+
+        let (x, y) = mouse_position();
+        for (bounds, label, normal, hover) in [
+            (yes, "Yes, capture", rgb(46, 79, 180), rgb(58, 99, 204)),
+            (cancel, "Cancel", rgb(54, 55, 65), rgb(70, 72, 82)),
+        ] {
+            let color = if bounds.contains(vec2(x, y)) {
+                hover
+            } else {
+                normal
+            };
+            draw_rectangle(bounds.x, bounds.y, bounds.w, bounds.h, color);
+            let width = measure_text(label, None, 18, 1.).width;
+            draw_text(
+                label,
+                bounds.x + (bounds.w - width) / 2.,
+                bounds.y + 24.,
+                18.,
+                WHITE,
+            );
+        }
+    }
+}
+
 #[cfg(target_os = "linux")]
 mod desktop;
 
@@ -437,6 +536,60 @@ struct RemoteInput {
 }
 
 impl RemoteInput {
+    fn key(&mut self, connection: &vnc::Connection, symbol: u32, down: bool) {
+        if down {
+            self.held_keys.insert(symbol);
+            connection.key(symbol, true);
+        } else if self.held_keys.remove(&symbol) {
+            connection.key(symbol, false);
+        }
+    }
+
+    fn release(&mut self, connection: &vnc::Connection) {
+        for key in self.held_keys.drain() {
+            connection.key(key, false);
+        }
+        if let Some((x, y, _)) = self.pointer.take() {
+            connection.pointer(x, y, 0);
+        }
+    }
+
+    fn captured_pointer(
+        &mut self,
+        connection: &vnc::Connection,
+        source: Rect,
+        x: i32,
+        y: i32,
+        button: Option<(u32, bool)>,
+    ) {
+        let bounds = focus_bounds(source.w / source.h);
+        let scale = screen_dpi_scale();
+        let (x, y) = Self::position(source, bounds, x as f32 / scale, y as f32 / scale);
+        let mut buttons = self.pointer.map_or(0, |(_, _, buttons)| buttons);
+        match button {
+            Some((button @ 1..=3, down)) => {
+                let bit = 1 << (button - 1);
+                if down {
+                    buttons |= bit;
+                } else {
+                    buttons &= !bit;
+                }
+            }
+            Some((button @ 4..=7, true)) => connection.pointer(x, y, buttons | (1 << (button - 1))),
+            Some(_) => return,
+            None if self.pointer == Some((x, y, buttons)) => return,
+            None => {}
+        }
+        connection.pointer(x, y, buttons);
+        self.pointer = Some((x, y, buttons));
+    }
+
+    fn position(source: Rect, bounds: Rect, x: f32, y: f32) -> (u16, u16) {
+        let x = ((x - bounds.x) * source.w / bounds.w).clamp(0., source.w - 1.);
+        let y = ((y - bounds.y) * source.h / bounds.h).clamp(0., source.h - 1.);
+        ((source.x + x) as u16, (source.y + y) as u16)
+    }
+
     fn update(
         &mut self,
         connection: &vnc::Connection,
@@ -444,12 +597,7 @@ impl RemoteInput {
         events: &mut FocusShortcut,
     ) {
         let Some(source) = source else {
-            for key in self.held_keys.drain() {
-                connection.key(key, false);
-            }
-            if let Some((x, y, _)) = self.pointer.take() {
-                connection.pointer(x, y, 0);
-            }
+            self.release(connection);
             events.keys.clear();
             events.clicks.clear();
             events.scroll = 0;
@@ -457,20 +605,11 @@ impl RemoteInput {
         };
         for (key, down) in events.keys.drain(..) {
             if let Some(symbol) = keysym(key) {
-                if down {
-                    self.held_keys.insert(symbol);
-                    connection.key(symbol, true);
-                } else if self.held_keys.remove(&symbol) {
-                    connection.key(symbol, false);
-                }
+                self.key(connection, symbol, down);
             }
         }
         let bounds = focus_bounds(source.w / source.h);
-        let position = |x: f32, y: f32| {
-            let x = ((x - bounds.x) * source.w / bounds.w).clamp(0., source.w - 1.);
-            let y = ((y - bounds.y) * source.h / bounds.h).clamp(0., source.h - 1.);
-            ((source.x + x) as u16, (source.y + y) as u16)
-        };
+        let position = |x, y| Self::position(source, bounds, x, y);
         let mut buttons = self.pointer.map_or(0, |(_, _, buttons)| buttons);
         for (button, down, x, y) in events.clicks.drain(..) {
             let bit = match button {
@@ -541,6 +680,9 @@ async fn main() {
     let mut screens = screen_mesh(&panorama, None);
     let mut vnc_status = updates.as_ref().map(|_| String::from("Connecting to VNC…"));
     let mut focused = None;
+    let mut prompt: Option<(&Monitor, CapturePrompt)> = None;
+    let mut capture = None;
+    let mut capture_error = None;
     let keyboard = register_input_subscriber();
     let mut focus_shortcut = FocusShortcut::default();
     let mut input = RemoteInput::default();
@@ -576,19 +718,25 @@ async fn main() {
                     });
                     screens = screen_mesh(&panorama, live.as_ref());
                     focused = None;
+                    prompt = None;
                 }
             }
             Some(Err(error)) => {
                 vnc_status = Some(format!("VNC disconnected: {error}"));
+                capture_error = None;
                 live = None;
                 focused = None;
+                prompt = None;
                 screens = screen_mesh(&panorama, None);
             }
             None => {}
         }
         let mouse = mouse_position();
         let super_held = is_key_down(KeyCode::LeftSuper) || is_key_down(KeyCode::RightSuper);
-        let look = focused.is_none() && super_held && is_mouse_button_down(MouseButton::Right);
+        let look = focused.is_none()
+            && prompt.is_none()
+            && super_held
+            && is_mouse_button_down(MouseButton::Right);
         if look {
             if let Some((x, y)) = previous {
                 yaw = (yaw - (mouse.0 - x) * 0.003).clamp(-1.1, 1.1);
@@ -598,7 +746,7 @@ async fn main() {
         } else {
             previous = None;
         }
-        if focused.is_none() && is_key_pressed(KeyCode::Home) {
+        if focused.is_none() && prompt.is_none() && is_key_pressed(KeyCode::Home) {
             yaw = 0.;
             pitch = REST_PITCH;
         }
@@ -611,27 +759,89 @@ async fn main() {
         // Use the event's modifiers so a quick tap still works between frames.
         repeat_all_miniquad_input(&mut focus_shortcut, keyboard);
         let toggled = std::mem::take(&mut focus_shortcut.triggered);
-        if toggled {
-            focused = if focused.is_some() {
-                None
-            } else {
-                monitor_at(direction)
-                    .filter(|monitor| panel_source(monitor, &panorama, live.as_ref()).is_some())
-            };
+        let mut suppress = false;
+        if capture.is_none() {
+            if let Some((monitor, dialog)) = &mut prompt {
+                suppress = true;
+                if let Some(accepted) = dialog.response(&focus_shortcut.clicks) {
+                    if accepted {
+                        match capture::Capture::start() {
+                            Ok(grab) => {
+                                focused = Some(*monitor);
+                                capture = Some(grab);
+                            }
+                            Err(error) => capture_error = Some(error),
+                        }
+                    }
+                    prompt = None;
+                }
+            } else if toggled {
+                capture_error = None;
+                focused = if focused.is_some() {
+                    None
+                } else {
+                    monitor_at(direction)
+                        .filter(|monitor| panel_source(monitor, &panorama, live.as_ref()).is_some())
+                };
+            } else if focused.is_none()
+                && live.is_some()
+                && is_mouse_button_pressed(MouseButton::Left)
+            {
+                capture_error = None;
+                let aspect = screen_width() / screen_height().max(1.);
+                let tangent = (HORIZONTAL_FOV.to_radians() / 2.).tan() / aspect.max(0.8);
+                let right = direction.cross(Vec3::Y).normalize();
+                let up = right.cross(direction);
+                let ray = direction
+                    + right * ((2. * mouse.0 / screen_width() - 1.) * tangent * aspect)
+                    + up * ((1. - 2. * mouse.1 / screen_height()) * tangent);
+                let monitor = monitor_at(ray)
+                    .or_else(|| monitor_at(direction))
+                    .unwrap_or(&MONITORS[1]);
+                if panel_source(monitor, &panorama, live.as_ref()).is_some() {
+                    prompt = Some((monitor, CapturePrompt::default()));
+                }
+            }
         }
 
         if let Some(connection) = &updates {
-            let source = if !toggled && live.is_some() {
-                focused.and_then(|monitor| panel_source(monitor, &panorama, live.as_ref()))
+            let source = focused
+                .filter(|_| live.is_some())
+                .and_then(|monitor| panel_source(monitor, &panorama, live.as_ref()));
+            if let Some(grab) = &capture {
+                let mut release = source.is_none();
+                if let Some(source) = source {
+                    for event in grab.events() {
+                        match event {
+                            capture::Event::Key(symbol, down) => {
+                                input.key(connection, symbol, down)
+                            }
+                            capture::Event::Pointer(x, y, button) => {
+                                input.captured_pointer(connection, source, x, y, button)
+                            }
+                            capture::Event::Release => {
+                                release = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if release {
+                    capture = None;
+                    focused = None;
+                    input.release(connection);
+                }
             } else {
-                None
-            };
-            input.update(connection, source, &mut focus_shortcut);
-        } else {
-            focus_shortcut.keys.clear();
-            focus_shortcut.clicks.clear();
-            focus_shortcut.scroll = 0;
+                input.update(
+                    connection,
+                    source.filter(|_| !toggled && !suppress),
+                    &mut focus_shortcut,
+                );
+            }
         }
+        focus_shortcut.keys.clear();
+        focus_shortcut.clicks.clear();
+        focus_shortcut.scroll = 0;
 
         let hint = if let Some(monitor) = focused {
             clear_background(BLACK);
@@ -642,7 +852,11 @@ async fn main() {
                     (&live.texture, source.w / source.h)
                 });
             draw_focused(texture, source, aspect);
-            "Super + Enter to release input and return to desk"
+            if capture.is_some() {
+                "Keyboard and mouse captured   |   Super + Esc to release"
+            } else {
+                "Super + Enter to return to desk"
+            }
         } else {
             clear_background(rgb(32, 30, 29));
             let aspect = screen_width() / screen_height().max(1.);
@@ -661,12 +875,18 @@ async fn main() {
             }
             draw_mesh(&screens);
             set_default_camera();
-            "Super + right-drag to look   |   Super + Enter to focus   |   Home to recenter"
+            if live.is_some() {
+                "Click to capture input   |   Super + right-drag to look   |   Super + Enter to focus only"
+            } else {
+                "Super + right-drag to look   |   Super + Enter to focus   |   Home to recenter"
+            }
         };
-        let hint = vnc_status.as_ref().map_or_else(
-            || hint.to_owned(),
-            |status| format!("{status}   |   {hint}"),
-        );
+        let hint = capture_error.map(str::to_owned).unwrap_or_else(|| {
+            vnc_status.as_ref().map_or_else(
+                || hint.to_owned(),
+                |status| format!("{status}   |   {hint}"),
+            )
+        });
         let label = measure_text(&hint, None, 16, 1.);
         let y = screen_height() - 15.;
         draw_rectangle(
@@ -677,6 +897,9 @@ async fn main() {
             Color::new(0.05, 0.05, 0.05, 0.86),
         );
         draw_text(&hint, 23., y, 16., rgb(225, 222, 218));
+        if let Some((_, dialog)) = &prompt {
+            dialog.draw();
+        }
         next_frame().await;
     }
 }

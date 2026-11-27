@@ -4,11 +4,14 @@ description = "A 3D pocket workspace for live desktop displays"
 repository = "https://github.com/BLig-Vox/presidio"
 readme = "README.md"
 include = ["src/**", "assets/**", "scripts/install-workspace", "README.md", "WORKSPACE.md"]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 
 [dependencies]
 macroquad = "0.4"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+x11-dl = "2.21"
 
 [package.metadata.binstall]
 pkg-url = "{repo}/releases/download/v{version}/{name}-{target}-v{version}{archive-suffix}"

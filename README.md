@@ -52,7 +52,9 @@ presidio --vnc 127.0.0.1:5900 --request-triple-layout
 | Control | Action |
 | --- | --- |
 | Super + right-drag | Look around the desk |
-| Super + Enter | Focus a monitor or release input back to the desk |
+| Click the live desk, then choose **Yes, capture** | Focus a monitor and give Presidio exclusive keyboard and mouse input (Linux X11) |
+| Super + Esc | Release captured input back to the host and return to the desk |
+| Super + Enter | Focus a monitor without grabbing host input, or return to the desk |
 | Home | Recenter your view |
 
 ## Build from source
