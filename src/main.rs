@@ -99,6 +99,7 @@ fn monitor_at(direction: Vec3) -> Option<&'static Monitor> {
 
 struct CameraLook {
     yaw: f32,
+    pitch: f32,
     half_fov_tangent: f32,
 }
 
@@ -106,6 +107,7 @@ impl Default for CameraLook {
     fn default() -> Self {
         Self {
             yaw: 0.,
+            pitch: REST_PITCH,
             half_fov_tangent: 0.75,
         }
     }
@@ -115,10 +117,15 @@ impl CameraLook {
     fn turn(&mut self, delta: Vec2) {
         // Stop before looking past the outer screens so they remain focusable.
         self.yaw = (self.yaw - delta.x * 0.002).clamp(-0.52, 0.52);
+        // Soften vertical input during sideways drags to avoid accidental tilt.
+        let vertical = (delta.y.abs() - delta.x.abs() * 0.25)
+            .max(0.)
+            .copysign(delta.y);
+        self.pitch = (self.pitch - vertical * 0.002).clamp(REST_PITCH - 0.4, REST_PITCH + 0.4);
     }
 
     fn zoom(&mut self, steps: f32) {
-        self.half_fov_tangent = (self.half_fov_tangent * 0.87_f32.powf(steps)).clamp(0.15, 1.0);
+        self.half_fov_tangent = (self.half_fov_tangent * 0.87_f32.powf(steps)).clamp(0.075, 1.0);
     }
 
     fn fovy(&self, aspect: f32) -> f32 {
@@ -127,9 +134,9 @@ impl CameraLook {
 
     fn direction(&self) -> Vec3 {
         vec3(
-            self.yaw.sin() * REST_PITCH.cos(),
-            REST_PITCH.sin(),
-            -self.yaw.cos() * REST_PITCH.cos(),
+            self.yaw.sin() * self.pitch.cos(),
+            self.pitch.sin(),
+            -self.yaw.cos() * self.pitch.cos(),
         )
     }
 
@@ -1172,18 +1179,23 @@ mod tests {
     }
 
     #[test]
-    fn camera_ignores_vertical_drift_and_zoom_preserves_look_direction() {
+    fn camera_pitches_on_deliberate_vertical_drags_without_sideways_drift() {
         let mut camera = CameraLook::default();
         let original = camera.direction();
-        camera.turn(vec2(0., 450.));
-        assert_eq!(camera.direction(), original);
-        let fov = camera.fovy(1.6);
-        camera.zoom(1.);
-        assert!(camera.fovy(1.6) < fov);
-        assert_eq!(camera.direction(), original);
-        camera.turn(vec2(30., -450.));
+        camera.turn(vec2(60., -8.));
         assert!(camera.direction().x < 0.);
         assert_eq!(camera.direction().y, original.y);
+
+        camera.turn(vec2(0., -150.));
+        assert!(camera.direction().y > original.y);
+        camera.turn(vec2(-30., 300.));
+        assert!(camera.direction().y < original.y);
+
+        camera.turn(vec2(0., -5000.));
+        let upper_limit = camera.direction();
+        camera.turn(vec2(0., -5000.));
+        assert_eq!(camera.direction(), upper_limit);
+        assert!(upper_limit.z < -0.5);
     }
 
     #[test]
@@ -1191,11 +1203,13 @@ mod tests {
         let mut camera = CameraLook::default();
         camera.turn(vec2(120., 0.));
         let aim = camera.direction();
+        let fov = camera.fovy(1.6);
 
         camera.zoom(8.);
         assert!(camera.half_fov_tangent < 0.30);
+        assert!(camera.fovy(1.6) < fov);
         camera.zoom(100.);
-        assert_eq!(camera.half_fov_tangent, 0.15);
+        assert_eq!(camera.half_fov_tangent, 0.075);
         assert_eq!(camera.direction(), aim);
     }
 
@@ -1203,7 +1217,7 @@ mod tests {
     fn camera_turn_limits_keep_the_outer_panels_focusable() {
         let mut camera = CameraLook::default();
         for (delta, index) in [(5000., 0), (-5000., 2)] {
-            camera.turn(vec2(delta, 4000.));
+            camera.turn(vec2(delta, 40.));
             let panel = monitor_at(camera.direction()).unwrap();
             assert!(std::ptr::eq(panel, &MONITORS[index]));
         }

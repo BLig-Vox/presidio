@@ -262,7 +262,7 @@ dependencies = [
 
 [[package]]
 name = "presidio"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "macroquad",
  "x11-dl",

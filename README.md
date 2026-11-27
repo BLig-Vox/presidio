@@ -53,7 +53,7 @@ presidio --vnc 127.0.0.1:5900 --request-triple-layout
 
 | Control | Action |
 | --- | --- |
-| Super + right-drag | Look left or right in the 3D desk, even while input is captured |
+| Super + right-drag | Look left, right, up, or down in the 3D desk, even while input is captured |
 | Super + mouse wheel or Super + + / - | Zoom the 3D desk |
 | Click the live desk, then choose **Yes, capture** | Keep the 3D desk and give Presidio exclusive keyboard and mouse input (Linux X11 and compatible native Wayland compositors, including Hyprland) |
 | Super + Esc | Release captured input back to the host and return to the desk |
