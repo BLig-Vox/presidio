@@ -102,21 +102,19 @@ impl WaylandPayload {
             if fds[1].revents & libc::POLLIN == 1 {
                 let mut count: [libc::size_t; 1] = [0];
                 let n_bits = core::mem::size_of::<libc::size_t>();
-                assert_eq!(
-                    libc::read(
-                        self.keyboard_context.timerfd,
-                        count.as_mut_ptr() as _,
-                        n_bits
-                    ),
-                    n_bits as _
-                );
-                for _ in 0..count[0] {
-                    self.keyboard_context.generate_key_repeat_events(
-                        &mut self.xkb,
-                        &self.keymap,
-                        self.xkb_state,
-                        &mut self.events,
-                    );
+                // A key release dispatched above can disarm the timer after poll
+                // reported it readable. Never wait for another expiration here.
+                if libc::read(self.keyboard_context.timerfd, count.as_mut_ptr() as _, n_bits)
+                    == n_bits as _
+                {
+                    for _ in 0..count[0] {
+                        self.keyboard_context.generate_key_repeat_events(
+                            &mut self.xkb,
+                            &self.keymap,
+                            self.xkb_state,
+                            &mut self.events,
+                        );
+                    }
                 }
             }
         } else {
@@ -248,7 +246,9 @@ impl KeyboardContext {
             enter_serial: None,
             repeat_info: Default::default(),
             repeated_key: None,
-            timerfd: unsafe { libc::timerfd_create(libc::CLOCK_MONOTONIC, libc::TFD_CLOEXEC) },
+            timerfd: unsafe {
+                libc::timerfd_create(libc::CLOCK_MONOTONIC, libc::TFD_CLOEXEC | libc::TFD_NONBLOCK)
+            },
         }
     }
     fn track_key_down(&mut self, key: core::ffi::c_uint) {
@@ -620,7 +620,8 @@ unsafe extern "C" fn keyboard_handle_key(
     let keycode = keycodes::translate_keysym(keysym);
     let keymods = display.keymap.get_keymods(libxkb, xkb_state);
     if state <= 1 {
-        input_capture::key(keysym, state == 1, keymods.logo);
+        let effective = (libxkb.xkb_state_key_get_one_sym)(xkb_state, key + 8);
+        input_capture::key(key, effective, state == 1, keymods.logo);
     }
     match state {
         0 => {

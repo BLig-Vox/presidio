@@ -8,12 +8,13 @@ pub enum Event {
 #[cfg(target_os = "linux")]
 mod x11 {
     use super::Event;
-    use std::{ffi::CStr, ptr};
+    use std::{cell::Cell, ffi::CStr, ptr};
     use x11_dl::{keysym, xlib};
 
     pub struct Capture {
         xlib: xlib::Xlib,
         display: *mut xlib::Display,
+        keys: [Cell<u32>; 256],
     }
 
     impl Capture {
@@ -24,7 +25,11 @@ mod x11 {
             if display.is_null() {
                 return Err("Could not connect to the X11 display.");
             }
-            let capture = Self { xlib, display };
+            let capture = Self {
+                xlib,
+                display,
+                keys: std::array::from_fn(|_| Cell::new(0)),
+            };
             capture.grab()?;
             Ok(capture)
         }
@@ -52,7 +57,11 @@ mod x11 {
                     return Err("Focus Presidio before capturing input.");
                 }
 
-                (xlib.XSelectInput)(display, window, xlib::StructureNotifyMask);
+                (xlib.XSelectInput)(
+                    display,
+                    window,
+                    xlib::StructureNotifyMask | xlib::FocusChangeMask,
+                );
                 (xlib.XkbSetDetectableAutoRepeat)(display, xlib::True, ptr::null_mut());
                 let keyboard = (xlib.XGrabKeyboard)(
                     display,
@@ -97,18 +106,25 @@ mod x11 {
                         xlib::KeyPress | xlib::KeyRelease => {
                             let key = event.key;
                             let down = key.type_ == xlib::KeyPress;
-                            let group = ((key.state >> 13) & 3) as i32;
-                            let lookup = |group| {
-                                (self.xlib.XkbKeycodeToKeysym)(
+                            let keycode = key.keycode as u8;
+                            let held = &self.keys[keycode as usize];
+                            let symbol = if down {
+                                if held.get() != 0 {
+                                    return Some(None);
+                                }
+                                let mut symbol = 0;
+                                (self.xlib.XkbLookupKeySym)(
                                     self.display,
-                                    key.keycode as u8,
-                                    group,
-                                    0,
-                                ) as u32
-                            };
-                            let symbol = match lookup(group) {
-                                0 if group != 0 => lookup(0),
-                                symbol => symbol,
+                                    keycode,
+                                    key.state,
+                                    &mut 0,
+                                    &mut symbol,
+                                );
+                                let symbol = symbol as u32;
+                                held.set(symbol);
+                                symbol
+                            } else {
+                                held.replace(0)
                             };
                             if down
                                 && symbol == keysym::XK_Escape
@@ -131,6 +147,14 @@ mod x11 {
                                 button.y,
                                 Some((button.button, button.type_ == xlib::ButtonPress)),
                             ))
+                        }
+                        xlib::FocusOut
+                            if matches!(
+                                event.focus_change.mode,
+                                xlib::NotifyNormal | xlib::NotifyWhileGrabbed
+                            ) && event.focus_change.detail != xlib::NotifyInferior =>
+                        {
+                            Some(Event::Release)
                         }
                         xlib::UnmapNotify | xlib::DestroyNotify => Some(Event::Release),
                         _ => None,

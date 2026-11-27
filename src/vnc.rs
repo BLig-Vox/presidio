@@ -1,8 +1,12 @@
 use std::{
     io::{self, Read, Write},
-    net::{SocketAddr, TcpStream},
+    net::{Shutdown, SocketAddr, TcpStream},
     os::unix::net::UnixStream,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering::Relaxed},
+        mpsc::{self, Receiver, SyncSender, TrySendError},
+        Arc, Mutex,
+    },
     time::Duration,
 };
 
@@ -33,48 +37,124 @@ pub struct Frame {
 }
 
 type Updates = Arc<Mutex<Option<Result<Frame, String>>>>;
-type Writer = Arc<Mutex<Option<Box<dyn Write + Send>>>>;
+const WRITE_TIMEOUT: Duration = Duration::from_millis(500);
+
+#[derive(Clone)]
+struct Outbound {
+    queue: SyncSender<Vec<u8>>,
+    overloaded: Arc<AtomicBool>,
+}
+
+impl Outbound {
+    fn send(&self, packet: Vec<u8>) -> io::Result<()> {
+        match self.queue.try_send(packet) {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(_)) => {
+                self.overloaded.store(true, Relaxed);
+                Err(io::Error::other("VNC send queue is full"))
+            }
+            Err(TrySendError::Disconnected(_)) => Err(io::Error::other("VNC writer disconnected")),
+        }
+    }
+}
+
+struct Session {
+    output: Updates,
+    outbound: Outbound,
+    packets: Receiver<Vec<u8>>,
+}
+
+impl Session {
+    fn run<W: Write + Send>(
+        self,
+        wire: impl Read + Write,
+        mut writer: W,
+        triple: bool,
+        allow_idle: impl Fn() -> io::Result<()>,
+        shutdown: impl FnOnce(&W) + Send,
+    ) -> io::Result<()> {
+        let done = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            let overloaded = &self.outbound.overloaded;
+            let done = &done;
+            let packets = self.packets;
+            let send = scope.spawn(move || {
+                let result = (|| {
+                    while !done.load(Relaxed) {
+                        if overloaded.load(Relaxed) {
+                            return Err(io::Error::other("VNC guest is not keeping up with input"));
+                        }
+                        match packets.recv_timeout(WRITE_TIMEOUT) {
+                            Ok(packet) => writer.write_all(&packet)?,
+                            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                        }
+                    }
+                    Ok(())
+                })();
+                // Wake a reader waiting for a framebuffer update after a failed write.
+                shutdown(&writer);
+                result
+            });
+            let result = receive(wire, triple, &self.output, &self.outbound, allow_idle);
+            done.store(true, Relaxed);
+            send.join().unwrap().and(result)
+        })
+    }
+}
 
 pub struct Connection {
     pub updates: Updates,
-    writer: Writer,
+    outbound: Outbound,
 }
 
 impl Connection {
-    fn send(&self, packet: &[u8]) {
-        if let Some(writer) = self.writer.lock().unwrap().as_mut() {
-            let _ = writer.write_all(packet);
-        }
+    pub fn key(&self, symbol: u32, down: bool) {
+        let _ = self.outbound.send(key_packet(symbol, down).into());
     }
 
-    pub fn key(&self, symbol: u32, down: bool) {
-        let mut packet = [4, u8::from(down), 0, 0, 0, 0, 0, 0];
-        packet[4..].copy_from_slice(&symbol.to_be_bytes());
-        self.send(&packet);
+    pub fn repeat_key(&self, symbol: u32) {
+        // TigerVNC ignores a second down for a key it considers held.
+        let mut packet = [0; 16];
+        packet[..8].copy_from_slice(&key_packet(symbol, false));
+        packet[8..].copy_from_slice(&key_packet(symbol, true));
+        let _ = self.outbound.send(packet.into());
     }
 
     pub fn pointer(&self, x: u16, y: u16, buttons: u8) {
         let mut packet = [5, buttons, 0, 0, 0, 0];
         packet[2..4].copy_from_slice(&x.to_be_bytes());
         packet[4..].copy_from_slice(&y.to_be_bytes());
-        self.send(&packet);
+        let _ = self.outbound.send(packet.into());
     }
+}
+
+fn key_packet(symbol: u32, down: bool) -> [u8; 8] {
+    let mut packet = [4, u8::from(down), 0, 0, 0, 0, 0, 0];
+    packet[4..].copy_from_slice(&symbol.to_be_bytes());
+    packet
 }
 
 pub fn connect(address: String, triple: bool) -> Connection {
     let updates = Updates::default();
-    let writer = Writer::default();
+    let (queue, packets) = mpsc::sync_channel(512);
+    let outbound = Outbound {
+        queue,
+        overloaded: Arc::new(AtomicBool::new(false)),
+    };
     let output = Arc::clone(&updates);
-    let input = Arc::clone(&writer);
+    let session = Session {
+        output: Arc::clone(&output),
+        outbound: outbound.clone(),
+        packets,
+    };
     std::thread::spawn(move || {
-        let result = open(&address, triple, &output, &input);
-        *input.lock().unwrap() = None;
-        if let Err(error) = result {
+        if let Err(error) = open(&address, triple, session) {
             eprintln!("VNC: {error}");
             *output.lock().unwrap() = Some(Err(error.to_string()));
         }
     });
-    Connection { updates, writer }
+    Connection { updates, outbound }
 }
 
 fn invalid(message: &str) -> io::Error {
@@ -122,7 +202,7 @@ fn pixels(width: u16, height: u16) -> io::Result<Vec<u8>> {
 const WIDTH: u16 = 1920;
 const HEIGHT: u16 = 1080;
 
-fn request_triple(wire: &mut dyn Write, existing: &[([u8; 4], Screen, [u8; 4])]) -> io::Result<()> {
+fn triple_request(existing: &[([u8; 4], Screen, [u8; 4])]) -> Vec<u8> {
     let mut packet = vec![251, 0];
     packet.extend((WIDTH * 3).to_be_bytes());
     packet.extend(HEIGHT.to_be_bytes());
@@ -145,18 +225,24 @@ fn request_triple(wire: &mut dyn Write, existing: &[([u8; 4], Screen, [u8; 4])])
         packet.extend(HEIGHT.to_be_bytes());
         packet.extend(flags);
     }
-    wire.write_all(&packet)
+    packet
 }
 
-fn open(address: &str, triple: bool, output: &Updates, input: &Writer) -> io::Result<()> {
+fn open(address: &str, triple: bool, session: Session) -> io::Result<()> {
     let timeout = Some(Duration::from_secs(5));
     if let Some(path) = address.strip_prefix("unix:") {
         let wire = UnixStream::connect(path)?;
         wire.set_read_timeout(timeout)?;
-        wire.set_write_timeout(timeout)?;
-        return receive(&wire, wire.try_clone()?, triple, output, input, || {
-            wire.set_read_timeout(None)
-        });
+        wire.set_write_timeout(Some(WRITE_TIMEOUT))?;
+        return session.run(
+            &wire,
+            wire.try_clone()?,
+            triple,
+            || wire.set_read_timeout(None),
+            |writer| {
+                let _ = writer.shutdown(Shutdown::Both);
+            },
+        );
     }
     // Unauthenticated TCP is limited to a local listener or pre-established tunnel.
     let address: SocketAddr = address
@@ -167,19 +253,25 @@ fn open(address: &str, triple: bool, output: &Updates, input: &Writer) -> io::Re
     }
     let wire = TcpStream::connect_timeout(&address, Duration::from_secs(5))?;
     wire.set_read_timeout(timeout)?;
-    wire.set_write_timeout(timeout)?;
-    receive(&wire, wire.try_clone()?, triple, output, input, || {
-        wire.set_read_timeout(None)
-    })
+    wire.set_write_timeout(Some(WRITE_TIMEOUT))?;
+    wire.set_nodelay(true)?;
+    session.run(
+        &wire,
+        wire.try_clone()?,
+        triple,
+        || wire.set_read_timeout(None),
+        |writer| {
+            let _ = writer.shutdown(Shutdown::Both);
+        },
+    )
 }
 
 fn receive(
     mut wire: impl Read + Write,
-    writer: impl Write + Send + 'static,
     mut triple: bool,
     output: &Updates,
-    input: &Writer,
-    allow_idle: impl Fn() -> io::Result<()>,
+    outbound: &Outbound,
+    allow_idle: impl FnOnce() -> io::Result<()>,
 ) -> io::Result<()> {
     if &read::<12>(&mut wire)? != b"RFB 003.008\n" {
         return Err(invalid("server must support RFB 3.8"));
@@ -217,12 +309,12 @@ fn receive(
         height,
     }];
     let mut incremental = false;
-    let mut writer = Some(writer);
+    let mut allow_idle = Some(allow_idle);
     loop {
         let mut request = vec![3, u8::from(incremental), 0, 0, 0, 0];
         request.extend(width.to_be_bytes());
         request.extend(height.to_be_bytes());
-        with_writer(input, &mut wire, |wire| wire.write_all(&request))?;
+        outbound.send(request)?;
         let rectangle_count = loop {
             match read::<1>(&mut wire)?[0] {
                 0 => break word(&read::<3>(&mut wire)?, 1),
@@ -288,7 +380,7 @@ fn receive(
                             })
                         });
                     if triple && !matches_triple {
-                        with_writer(input, &mut wire, |wire| request_triple(wire, &layout))?;
+                        outbound.send(triple_request(&layout))?;
                         awaiting_resize = true;
                     }
                     triple = false;
@@ -307,28 +399,75 @@ fn receive(
             }
         }
         if changed && incremental && !awaiting_resize {
-            if let Some(writer) = writer.take() {
+            if let Some(allow_idle) = allow_idle.take() {
                 allow_idle()?; // An unchanged desktop can be idle indefinitely.
-                *input.lock().unwrap() = Some(Box::new(writer));
             }
-            *output.lock().unwrap() = Some(Ok(Frame {
+            let frame = Frame {
                 width,
                 height,
                 pixels: buffer.clone(),
                 screens: screens.clone(),
-            }));
+            };
+            *output.lock().unwrap() = Some(Ok(frame));
         }
     }
 }
 
-fn with_writer(
-    input: &Writer,
-    initial_wire: &mut dyn Write,
-    write: impl FnOnce(&mut dyn Write) -> io::Result<()>,
-) -> io::Result<()> {
-    let mut writer = input.lock().unwrap();
-    match writer.as_mut() {
-        Some(writer) => write(writer.as_mut()),
-        None => write(initial_wire),
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stalled_guest_does_not_block_input_or_keep_the_session_alive() {
+        let (client, mut guest) = UnixStream::pair().unwrap();
+        client.set_write_timeout(Some(WRITE_TIMEOUT)).unwrap();
+        guest
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let (queue, packets) = mpsc::sync_channel(1);
+        let outbound = Outbound {
+            queue,
+            overloaded: Arc::new(AtomicBool::new(false)),
+        };
+        let session = Session {
+            output: Updates::default(),
+            outbound: outbound.clone(),
+            packets,
+        };
+        let (finished, result) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let writer = client.try_clone().unwrap();
+            let ended = session.run(
+                &client,
+                writer,
+                false,
+                || Ok(()),
+                |wire| {
+                    let _ = wire.shutdown(Shutdown::Both);
+                },
+            );
+            finished.send(ended).unwrap();
+        });
+
+        guest.write_all(b"RFB 003.008\n").unwrap();
+        assert_eq!(&read::<12>(&mut guest).unwrap(), b"RFB 003.008\n");
+        guest.write_all(&[1, 1]).unwrap();
+        assert_eq!(read::<1>(&mut guest).unwrap(), [1]);
+        guest.write_all(&[0; 4]).unwrap();
+        assert_eq!(read::<1>(&mut guest).unwrap(), [1]);
+        let mut init = [0; 24];
+        init[..4].copy_from_slice(&[0, 1, 0, 1]);
+        guest.write_all(&init).unwrap();
+        assert_eq!(read::<20>(&mut guest).unwrap()[0], 0);
+        assert_eq!(read::<12>(&mut guest).unwrap()[0], 2);
+        assert_eq!(read::<10>(&mut guest).unwrap()[0], 3);
+        // Stop reading while the writer works on more data than a Unix socket can buffer.
+        outbound.send(vec![0; 4 * 1024 * 1024]).unwrap();
+        assert!((0..3).any(|_| outbound.send(key_packet(0xff08, true).into()).is_err()));
+        assert!(result
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .is_err());
+        worker.join().unwrap();
     }
 }

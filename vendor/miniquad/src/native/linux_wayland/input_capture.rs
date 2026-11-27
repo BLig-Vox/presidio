@@ -1,7 +1,7 @@
 #![allow(non_camel_case_types, non_upper_case_globals)]
 use super::{extensions::cursor::*, libwayland_client::*, WaylandPayload};
 use crate::{wayland_interface, wl_request, wl_request_constructor};
-use std::{cell::RefCell, ffi::c_void, ptr};
+use std::{cell::RefCell, collections::BTreeMap, ffi::c_void, ptr};
 
 wayland_interface!(
     inhibit_manager,
@@ -56,12 +56,14 @@ pub enum Event {
 struct Input {
     status: Status,
     events: Vec<Event>,
+    keys: BTreeMap<u32, u32>,
 }
 
 thread_local! {
     static INPUT: RefCell<Input> = const { RefCell::new(Input {
         status: Status::NotWayland,
         events: Vec::new(),
+        keys: BTreeMap::new(),
     }) };
 }
 
@@ -92,18 +94,34 @@ pub fn events() -> Vec<Event> {
 }
 
 fn set_status(status: Status) {
-    INPUT.with(|input| input.borrow_mut().status = status);
+    INPUT.with(|input| {
+        let mut input = input.borrow_mut();
+        input.status = status;
+        if status != Status::Active {
+            input.keys.clear();
+        }
+    });
 }
 
 fn emit(event: Event) {
     INPUT.with(|input| input.borrow_mut().events.push(event));
 }
 
-pub(super) fn key(symbol: u32, down: bool, logo: bool) {
+pub(super) fn key(code: u32, symbol: u32, down: bool, logo: bool) {
     if matches!(status(), Status::Pending | Status::Active) && down && logo && symbol == 0xff1b {
         lose_capture();
-    } else if status() == Status::Active && symbol != 0 {
-        emit(Event::Key(symbol, down));
+    } else if status() == Status::Active {
+        INPUT.with(|input| {
+            let mut input = input.borrow_mut();
+            if down {
+                if symbol != 0 && !input.keys.contains_key(&code) {
+                    input.keys.insert(code, symbol);
+                    input.events.push(Event::Key(symbol, true));
+                }
+            } else if let Some(symbol) = input.keys.remove(&code) {
+                input.events.push(Event::Key(symbol, false));
+            }
+        });
     }
 }
 
