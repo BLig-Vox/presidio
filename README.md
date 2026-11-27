@@ -10,12 +10,12 @@ Presidio is a Rust desktop app. On Linux x86-64, the full workspace bundle runs 
 
 ## Quick start
 
-**App only:** Download the Linux x86-64 archive from the [GitHub release](https://github.com/alexander-vox/presidio/releases/latest). Extract it to a permanent directory, then run `./presidio --desktop`.
+**App only:** Download the Linux x86-64 archive from the [GitHub release](https://github.com/BLig-Vox/presidio/releases/latest). Extract it to a permanent directory, then run `./presidio --desktop`.
 
 Or use Cargo Binstall to fetch the same GitHub binary without compiling:
 
 ```sh
-cargo binstall --git https://github.com/alexander-vox/presidio.git presidio
+cargo binstall --git https://github.com/BLig-Vox/presidio.git presidio
 presidio --desktop
 ```
 
