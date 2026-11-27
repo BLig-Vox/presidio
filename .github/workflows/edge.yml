@@ -4,10 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       channel:
-        description: Build stable release artifacts or publish an Edge preview
+        description: Build artifacts, stage release drafts, or publish an Edge preview
         type: choice
-        options: [stable, edge]
+        options: [stable, stage, edge]
         default: stable
+      edge_draft:
+        description: Optional Edge draft tag to stage alongside the stable draft
+        type: string
 
 permissions:
   contents: read
@@ -16,6 +19,8 @@ jobs:
   package:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-22.04
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - name: Prepare bundled runtime
@@ -27,7 +32,31 @@ jobs:
           echo "cd54be9fae93ff5d9660be9e91efe9dfd296ef8e9de380f10e49615110c40146  $base" | sha256sum -c
           tar -xzf "$base" runtime
       - run: scripts/package-release --workspace
+      - name: Upload to release drafts
+        if: inputs.channel == 'stage'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EDGE_DRAFT: ${{ inputs.edge_draft }}
+        run: |
+          workspace=(dist/presidio-workspace-*.tgz)
+          tag=${workspace[0]##*-}
+          tag=${tag%.tgz}
+          verify_draft() {
+            [[ $(gh release view "$1" --json isDraft,targetCommitish \
+              --jq 'select(.isDraft) | .targetCommitish') == "$GITHUB_SHA" ]]
+          }
+          verify_draft "$tag"
+          if [[ -n "$EDGE_DRAFT" ]]; then
+            verify_draft "$EDGE_DRAFT"
+          fi
+          gh release upload "$tag" dist/*.tgz
+          if [[ -n "$EDGE_DRAFT" ]]; then
+            edge_asset="presidio-workspace-x86_64-unknown-linux-gnu-$EDGE_DRAFT.tgz"
+            ln "${workspace[0]}" "$edge_asset"
+            gh release upload "$EDGE_DRAFT" "$edge_asset"
+          fi
       - uses: actions/upload-artifact@v4
+        if: inputs.channel != 'stage'
         with:
           name: release
           path: dist/*.tgz

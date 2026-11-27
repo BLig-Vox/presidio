@@ -32,7 +32,7 @@ The managed installer adds `~/.local/bin/presidio`; use that full path if the di
 Install [Cargo Binstall](https://github.com/cargo-bins/cargo-binstall#quickly) once if `cargo binstall` is not available. Then install the precompiled Presidio binary from GitHub Releases and set up the full workspace:
 
 ```sh
-cargo binstall presidio && presidio --desktop
+cargo binstall --git https://github.com/BLig-Vox/presidio.git presidio && presidio --desktop
 ```
 
 The first command downloads the binary without compiling. The second downloads and verifies the Arch/Xfce workspace bundle, then registers Presidio in your applications menu. After setup, run `presidio` or open it from the menu.
