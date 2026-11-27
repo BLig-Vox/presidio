@@ -40,11 +40,27 @@ pub fn handle_command() -> io::Result<()> {
             eprintln!("Use presidio --update --edge to install a preview.");
             std::process::exit(2);
         }
-        None if option.is_none() => {
+        None | Some("--host-audio") if option.is_none() || flag == Some("--host-audio") => {
+            let host_audio = flag == Some("--host-audio");
+            if host_audio && args.next().is_some() {
+                eprintln!("Usage: presidio --host-audio");
+                std::process::exit(2);
+            }
             let launcher = bundled_launcher
                 .or_else(|| Some(data_home().ok()?.join("presidio/current/scripts/arch-oci")));
             match launcher.filter(|path| path.is_file()) {
-                Some(launcher) => Err(Command::new(launcher).arg("--launch").exec()),
+                Some(launcher) => {
+                    let mut command = Command::new(launcher);
+                    command.arg("--launch");
+                    if host_audio {
+                        command.env("PRESIDIO_HOST_AUDIO", "1");
+                    }
+                    Err(command.exec())
+                }
+                None if host_audio => Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "--host-audio requires the bundled Linux workspace",
+                )),
                 None => Ok(()),
             }
         }

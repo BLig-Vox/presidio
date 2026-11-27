@@ -18,6 +18,8 @@ installer=$(curl -fsSL https://raw.githubusercontent.com/BLig-Vox/presidio/main/
 
 Open **Presidio** from your applications menu. The workspace starts automatically and keeps your files between launches. The host must allow unprivileged user namespaces. See [Workspace setup](WORKSPACE.md) for details.
 
+To play workspace audio through your host speakers or headphones, launch with `presidio --host-audio`. This shares your PipeWire/PulseAudio server with guest apps, including access to its input sources such as microphones.
+
 ### Update the workspace
 
 ```sh

@@ -57,11 +57,22 @@ run=$(json_path "$state/run")
 assets=$(json_path "$project/art/workspace")
 proc='{"destination":"/proc","type":"proc","source":"proc","options":["nosuid","nodev","noexec"]}'
 desktop_env=''
+audio_mount=''
+if [[ ${PRESIDIO_HOST_AUDIO:-0} == 1 ]]; then
+    pulse_socket="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/pulse/native"
+    if [[ -S $pulse_socket ]]; then
+        pulse_source=$(json_path "$pulse_socket")
+        desktop_env=',"PULSE_SERVER=unix:/tmp/presidio-pulse"'
+        audio_mount='{"destination":"/tmp/presidio-pulse","type":"bind","source":'"$pulse_source"',"options":["bind","ro","nosuid","nodev","noexec"]},'
+    else
+        echo "Host audio unavailable: no PipeWire/PulseAudio socket at $pulse_socket" >&2
+    fi
+fi
 if [[ ${MRP_NESTED_PROC:-0} == 1 ]]; then
     # The curated workspace can use the outer procfs read-only on nested hosts.
     # Its PID numbers do not match the inner namespace; glycin's secondary
     # sandbox cannot start here. Keep the outer OCI isolation in place.
-    desktop_env=',"GLYCIN_DISABLE_SANDBOX=i-know-the-risks"'
+    desktop_env+=',"GLYCIN_DISABLE_SANDBOX=i-know-the-risks"'
     proc='{"destination":"/proc","type":"bind","source":"/proc","options":["rbind","ro","nosuid","nodev","noexec"]}'
 fi
 
@@ -82,6 +93,7 @@ cat > "$bundle/config.json" <<JSON
   {"destination":"/dev/pts","type":"devpts","source":"devpts","options":["newinstance","nosuid","noexec","ptmxmode=0666","mode=0620"]},
   {"destination":"/dev/shm","type":"tmpfs","source":"shm","options":["nosuid","nodev","noexec","mode=1777","size=128m"]},
   {"destination":"/tmp","type":"tmpfs","source":"tmpfs","options":["nosuid","nodev","mode=1777"]},
+  $audio_mount
   {"destination":"/root","type":"bind","source":$home,"options":["bind","rw","nosuid","nodev"]},
   {"destination":"/run/workspace","type":"bind","source":$run,"options":["bind","rw","nosuid","nodev"]},
   {"destination":"/opt/mr-president","type":"bind","source":$assets,"options":["bind","ro","nosuid","nodev"]},

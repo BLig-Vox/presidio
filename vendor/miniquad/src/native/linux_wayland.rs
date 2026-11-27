@@ -65,6 +65,7 @@ struct WaylandPayload {
     keyboard_context: KeyboardContext,
     drag_n_drop: drag_n_drop::WaylandDnD,
     update_requested: bool,
+    frame_pending: bool,
     input_capture: input_capture::Backend,
 }
 
@@ -73,7 +74,7 @@ impl WaylandPayload {
     /// available
     // needs to combine both the Wayland events and the key repeat events
     // the implementation is translated from glfw
-    unsafe fn poll_new_event(&mut self, blocking: bool) {
+    unsafe fn poll_new_event(&mut self, mut blocking: bool) {
         let mut fds = [
             libc::pollfd {
                 fd: (self.client.wl_display_get_fd)(self.display),
@@ -86,10 +87,11 @@ impl WaylandPayload {
                 revents: 0,
             },
         ];
-        (self.client.wl_display_flush)(self.display);
         while (self.client.wl_display_prepare_read)(self.display) != 0 {
             (self.client.wl_display_dispatch_pending)(self.display);
+            blocking = false;
         }
+        (self.client.wl_display_flush)(self.display);
         if libc::poll(fds.as_mut_ptr(), 2, if blocking { i32::MAX } else { 0 }) > 0 {
             // if the Wayland display has events available
             if fds[0].revents & libc::POLLIN == 1 {
@@ -1052,6 +1054,18 @@ unsafe extern "C" fn registry_add_object(
     }
 }
 
+unsafe extern "C" fn frame_done(
+    data: *mut std::ffi::c_void,
+    callback: *mut wl_callback,
+    _time: u32,
+) {
+    let display: &mut WaylandPayload = &mut *(data as *mut _);
+    (display.client.wl_proxy_destroy)(callback as _);
+    display.frame_pending = false;
+}
+
+static FRAME_LISTENER: wl_callback_listener = wl_callback_listener { done: frame_done };
+
 unsafe extern "C" fn xdg_wm_base_handle_ping(
     data: *mut std::ffi::c_void,
     toplevel: *mut extensions::xdg_shell::xdg_wm_base,
@@ -1066,6 +1080,8 @@ unsafe extern "C" fn xdg_wm_base_handle_ping(
         extensions::xdg_shell::xdg_wm_base::pong,
         serial
     );
+    // Send the reply before drawing or entering the driver again.
+    (payload.client.wl_display_flush)(payload.display);
 }
 
 unsafe extern "C" fn data_device_handle_data_offer(
@@ -1139,6 +1155,7 @@ where
             keyboard_context: KeyboardContext::new(),
             drag_n_drop: Default::default(),
             update_requested: true,
+            frame_pending: false,
             input_capture: Default::default(),
         };
 
@@ -1205,7 +1222,18 @@ where
             panic!("eglMakeCurrent failed");
         }
 
-        if (libegl.eglSwapInterval)(egl_display, conf.platform.swap_interval.unwrap_or(1)) == 0 {
+        // In the default continuous loop, let the compositor pace rendering from
+        // our event loop rather than block inside EGL. Hidden windows may stop
+        // receiving frame callbacks, but must still dispatch pings and input.
+        let callback_pacing =
+            !conf.platform.blocking_event_loop && conf.platform.swap_interval.is_none();
+        // EGL configurations can reject or clamp interval zero. Callbacks still
+        // prevent us from attempting another swap while the surface is hidden.
+        let swap_interval = conf
+            .platform
+            .swap_interval
+            .unwrap_or(if callback_pacing { 0 } else { 1 });
+        if (libegl.eglSwapInterval)(egl_display, swap_interval) == 0 {
             eprintln!("eglSwapInterval failed");
         }
 
@@ -1294,11 +1322,15 @@ where
                 }
             }
 
-            // If `blocking_event_loop` is set but an update is requested, we should still poll the
-            // new events but continue without blocking
-            let blocking = conf.platform.blocking_event_loop && !display.update_requested;
+            // Wait for Wayland events without waiting inside the graphics driver.
+            let blocking = display.frame_pending
+                || (conf.platform.blocking_event_loop && !display.update_requested);
             display.poll_new_event(blocking);
 
+            let lost_focus = display
+                .events
+                .iter()
+                .any(|event| matches!(event, WaylandEvent::WindowMinimized));
             for event in display.events.drain(..) {
                 match event {
                     WaylandEvent::KeyDown(keycode, keymods, repeat) => {
@@ -1362,11 +1394,35 @@ where
                 }
             }
 
-            if !conf.platform.blocking_event_loop || display.update_requested {
+            if !display.frame_pending
+                && (!conf.platform.blocking_event_loop || display.update_requested)
+            {
                 display.update_requested = false;
                 event_handler.update();
                 event_handler.draw();
+                if callback_pacing {
+                    let callback: *mut wl_callback = wl_request_constructor!(
+                        display.client,
+                        display.surface,
+                        WL_SURFACE_FRAME,
+                        display.client.wl_callback_interface
+                    );
+                    assert!(!callback.is_null());
+                    (display.client.wl_proxy_add_listener)(
+                        callback as _,
+                        &FRAME_LISTENER as *const _ as _,
+                        &mut display as *mut _ as _,
+                    );
+                    display.frame_pending = true;
+                }
                 (libegl.eglSwapBuffers)(egl_display, egl_surface);
+            } else if display.frame_pending
+                && (lost_focus || input_capture::status() == input_capture::Status::Lost)
+            {
+                // Give the app a chance to release guest input without waiting
+                // for a presentation callback that a hidden window may not get.
+                event_handler.update();
+                event_handler.draw();
             }
         }
     }

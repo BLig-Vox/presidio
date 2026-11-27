@@ -114,11 +114,11 @@ impl Default for CameraLook {
 impl CameraLook {
     fn turn(&mut self, delta: Vec2) {
         // Stop before looking past the outer screens so they remain focusable.
-        self.yaw = (self.yaw + delta.x * 0.002).clamp(-0.52, 0.52);
+        self.yaw = (self.yaw - delta.x * 0.002).clamp(-0.52, 0.52);
     }
 
     fn zoom(&mut self, steps: f32) {
-        self.half_fov_tangent = (self.half_fov_tangent * 0.87_f32.powf(steps)).clamp(0.30, 1.0);
+        self.half_fov_tangent = (self.half_fov_tangent * 0.87_f32.powf(steps)).clamp(0.15, 1.0);
     }
 
     fn fovy(&self, aspect: f32) -> f32 {
@@ -1182,14 +1182,27 @@ mod tests {
         assert!(camera.fovy(1.6) < fov);
         assert_eq!(camera.direction(), original);
         camera.turn(vec2(30., -450.));
-        assert!(camera.direction().x > 0.);
+        assert!(camera.direction().x < 0.);
         assert_eq!(camera.direction().y, original.y);
+    }
+
+    #[test]
+    fn camera_zooms_closer_without_changing_aim() {
+        let mut camera = CameraLook::default();
+        camera.turn(vec2(120., 0.));
+        let aim = camera.direction();
+
+        camera.zoom(8.);
+        assert!(camera.half_fov_tangent < 0.30);
+        camera.zoom(100.);
+        assert_eq!(camera.half_fov_tangent, 0.15);
+        assert_eq!(camera.direction(), aim);
     }
 
     #[test]
     fn camera_turn_limits_keep_the_outer_panels_focusable() {
         let mut camera = CameraLook::default();
-        for (delta, index) in [(-5000., 0), (5000., 2)] {
+        for (delta, index) in [(5000., 0), (-5000., 2)] {
             camera.turn(vec2(delta, 4000.));
             let panel = monitor_at(camera.direction()).unwrap();
             assert!(std::ptr::eq(panel, &MONITORS[index]));
