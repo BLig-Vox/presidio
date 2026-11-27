@@ -121,7 +121,7 @@ impl CameraLook {
         let vertical = (delta.y.abs() - delta.x.abs() * 0.25)
             .max(0.)
             .copysign(delta.y);
-        self.pitch = (self.pitch - vertical * 0.002).clamp(REST_PITCH - 0.4, REST_PITCH + 0.4);
+        self.pitch = (self.pitch + vertical * 0.002).clamp(REST_PITCH - 0.4, REST_PITCH + 0.4);
     }
 
     fn zoom(&mut self, steps: f32) {
@@ -1186,14 +1186,15 @@ mod tests {
         assert!(camera.direction().x < 0.);
         assert_eq!(camera.direction().y, original.y);
 
+        // Drag the desk with the pointer, as with horizontal panning.
         camera.turn(vec2(0., -150.));
-        assert!(camera.direction().y > original.y);
-        camera.turn(vec2(-30., 300.));
         assert!(camera.direction().y < original.y);
+        camera.turn(vec2(-30., 300.));
+        assert!(camera.direction().y > original.y);
 
-        camera.turn(vec2(0., -5000.));
+        camera.turn(vec2(0., 5000.));
         let upper_limit = camera.direction();
-        camera.turn(vec2(0., -5000.));
+        camera.turn(vec2(0., 5000.));
         assert_eq!(camera.direction(), upper_limit);
         assert!(upper_limit.z < -0.5);
     }
