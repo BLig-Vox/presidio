@@ -442,6 +442,11 @@ fn config() -> Conf {
     Conf {
         platform: macroquad::miniquad::conf::Platform {
             linux_wm_class: "presidio",
+            linux_backend: if capture::wayland_session() {
+                macroquad::miniquad::conf::LinuxBackend::WaylandWithX11Fallback
+            } else {
+                macroquad::miniquad::conf::LinuxBackend::X11WithWaylandFallback
+            },
             ..Default::default()
         },
         window_title: "Presidio".into(),
@@ -819,6 +824,11 @@ async fn main() {
                             capture::Event::Pointer(x, y, button) => {
                                 input.captured_pointer(connection, source, x, y, button)
                             }
+                            capture::Event::Failed(error) => {
+                                capture_error = Some(error);
+                                release = true;
+                                break;
+                            }
                             capture::Event::Release => {
                                 release = true;
                                 break;
@@ -852,7 +862,9 @@ async fn main() {
                     (&live.texture, source.w / source.h)
                 });
             draw_focused(texture, source, aspect);
-            if capture.is_some() {
+            if capture.as_ref().is_some_and(capture::Capture::pending) {
+                "Waiting for Wayland to grant capture   |   Super + Esc to cancel"
+            } else if capture.is_some() {
                 "Keyboard and mouse captured   |   Super + Esc to release"
             } else {
                 "Super + Enter to return to desk"

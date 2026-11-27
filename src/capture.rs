@@ -2,10 +2,11 @@ pub enum Event {
     Key(u32, bool),
     Pointer(i32, i32, Option<(u32, bool)>),
     Release,
+    Failed(&'static str),
 }
 
 #[cfg(target_os = "linux")]
-mod platform {
+mod x11 {
     use super::Event;
     use std::{ffi::CStr, ptr};
     use x11_dl::{keysym, xlib};
@@ -17,12 +18,6 @@ mod platform {
 
     impl Capture {
         pub fn start() -> Result<Self, &'static str> {
-            if std::env::var_os("WAYLAND_DISPLAY").is_some()
-                || std::env::var("XDG_SESSION_TYPE").as_deref() == Ok("wayland")
-            {
-                return Err("Full input capture requires an X11 session.");
-            }
-
             let xlib = xlib::Xlib::open().map_err(|_| "Could not load X11 input support.")?;
             // A separate client receives the grabbed events instead of the window toolkit.
             let display = unsafe { (xlib.XOpenDisplay)(ptr::null()) };
@@ -153,6 +148,78 @@ mod platform {
     }
 }
 
+#[cfg(target_os = "linux")]
+mod platform {
+    use super::{x11, Event};
+    use macroquad::miniquad::native::linux_wayland::input_capture::{self, Status};
+    use std::time::{Duration, Instant};
+
+    pub enum Capture {
+        X11(x11::Capture),
+        Wayland(Instant),
+    }
+
+    impl Capture {
+        pub fn start() -> Result<Self, &'static str> {
+            match input_capture::status() {
+                Status::NotWayland if super::wayland_session() => {
+                    Err("Full input capture needs a native Wayland window, not XWayland.")
+                }
+                Status::NotWayland => x11::Capture::start().map(Self::X11),
+                Status::Unsupported => Err(
+                    "This compositor does not support pointer confinement and shortcut inhibition.",
+                ),
+                Status::Idle if input_capture::request(true) => Ok(Self::Wayland(Instant::now())),
+                _ => Err("Could not request Wayland input capture."),
+            }
+        }
+
+        pub fn pending(&self) -> bool {
+            matches!(self, Self::Wayland(_)) && input_capture::status() == Status::Pending
+        }
+
+        pub fn events(&self) -> impl Iterator<Item = Event> + '_ {
+            let empty = Vec::new().into_iter();
+            let (x11, wayland) = match self {
+                Self::X11(grab) => (Some(grab.events()), empty),
+                Self::Wayland(started) => {
+                    let mut events: Vec<_> = input_capture::events()
+                        .into_iter()
+                        .map(|event| match event {
+                            input_capture::Event::Key(symbol, down) => Event::Key(symbol, down),
+                            input_capture::Event::Pointer(x, y, button) => {
+                                Event::Pointer(x, y, button)
+                            }
+                            input_capture::Event::Release => Event::Release,
+                        })
+                        .collect();
+                    if self.pending() && started.elapsed() >= Duration::from_secs(1) {
+                        events.push(Event::Failed(
+                            "Wayland capture was not granted. Click the monitor to retry.",
+                        ));
+                    }
+                    (None, events.into_iter())
+                }
+            };
+            x11.into_iter().flatten().chain(wayland)
+        }
+    }
+
+    impl Drop for Capture {
+        fn drop(&mut self) {
+            if matches!(self, Self::Wayland(_)) {
+                input_capture::request(false);
+            }
+        }
+    }
+}
+
+pub fn wayland_session() -> bool {
+    std::env::var_os("WAYLAND_DISPLAY").is_some()
+        || std::env::var_os("WAYLAND_SOCKET").is_some()
+        || std::env::var("XDG_SESSION_TYPE").as_deref() == Ok("wayland")
+}
+
 #[cfg(not(target_os = "linux"))]
 mod platform {
     use super::Event;
@@ -161,7 +228,11 @@ mod platform {
 
     impl Capture {
         pub fn start() -> Result<Self, &'static str> {
-            Err("Full input capture requires a Linux X11 session.")
+            Err("Full input capture is supported on Linux.")
+        }
+
+        pub fn pending(&self) -> bool {
+            false
         }
 
         pub fn events(&self) -> impl Iterator<Item = Event> {

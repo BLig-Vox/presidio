@@ -52,10 +52,16 @@ presidio --vnc 127.0.0.1:5900 --request-triple-layout
 | Control | Action |
 | --- | --- |
 | Super + right-drag | Look around the desk |
-| Click the live desk, then choose **Yes, capture** | Focus a monitor and give Presidio exclusive keyboard and mouse input (Linux X11) |
+| Click the live desk, then choose **Yes, capture** | Focus a monitor and give Presidio exclusive keyboard and mouse input (Linux X11 and compatible native Wayland compositors, including Hyprland) |
 | Super + Esc | Release captured input back to the host and return to the desk |
 | Super + Enter | Focus a monitor without grabbing host input, or return to the desk |
 | Home | Recenter your view |
+
+On Wayland, capture requires compositor support for pointer confinement and
+keyboard shortcut inhibition. Presidio also requests an exclusive focus grab on
+Hyprland when available. If the compositor revokes capture or Presidio loses
+keyboard focus, Presidio releases the guest's held keys and buttons. Shortcuts
+explicitly configured to bypass inhibition remain under the compositor's control.
 
 ## Build from source
 
