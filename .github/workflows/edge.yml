@@ -1,0 +1,56 @@
+name: Build release workspace
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Build stable release artifacts or publish an Edge preview
+        type: choice
+        options: [stable, edge]
+        default: stable
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare bundled runtime
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          base=presidio-workspace-x86_64-unknown-linux-gnu-v0.1.0.tgz
+          gh release download v0.1.0 --pattern "$base"
+          echo "cd54be9fae93ff5d9660be9e91efe9dfd296ef8e9de380f10e49615110c40146  $base" | sha256sum -c
+          tar -xzf "$base" runtime
+      - run: scripts/package-release --workspace
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release
+          path: dist/*.tgz
+          compression-level: 0
+          if-no-files-found: error
+
+  edge:
+    if: inputs.channel == 'edge'
+    needs: package
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release
+      - name: Publish Edge workspace
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="edge-$GITHUB_RUN_ID"
+          asset="presidio-workspace-x86_64-unknown-linux-gnu-$tag.tgz"
+          mv presidio-workspace-*.tgz "$asset"
+          gh release create "$tag" "$asset" --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" --prerelease --title "Presidio Edge $GITHUB_RUN_NUMBER" \
+            --notes "Preview workspace built from $GITHUB_SHA."

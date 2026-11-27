@@ -3,8 +3,8 @@ name = "presidio"
 description = "A 3D pocket workspace for live desktop displays"
 repository = "https://github.com/BLig-Vox/presidio"
 readme = "README.md"
-include = ["src/**", "assets/**", "README.md", "WORKSPACE.md"]
-version = "0.1.0"
+include = ["src/**", "assets/**", "scripts/install-workspace", "README.md", "WORKSPACE.md"]
+version = "0.1.1"
 edition = "2021"
 
 [dependencies]

@@ -18,28 +18,30 @@ installer=$(curl -fsSL https://raw.githubusercontent.com/BLig-Vox/presidio/main/
 
 Open **Presidio** from your applications menu. The workspace starts automatically and keeps your files between launches. The host must allow unprivileged user namespaces. See [Workspace setup](WORKSPACE.md) for details.
 
+### Update the workspace
+
+```sh
+presidio --update         # Latest stable build, including switching back from Edge
+presidio --update --edge  # Latest published preview build
+```
+
+The managed installer adds `~/.local/bin/presidio`; use that full path if the directory isn't on your PATH and you did not install via Binstall. If you installed before these commands were added, rerun the full-workspace installer above once. Updates need Python 3 for release metadata, verify the download checksum, and keep your workspace files. If no Edge build is published, your installation stays unchanged.
+
+### Install with Cargo Binstall (Linux x86-64)
+
+Install [Cargo Binstall](https://github.com/cargo-bins/cargo-binstall#quickly) once if `cargo binstall` is not available. Then install the precompiled Presidio binary from GitHub Releases and set up the full workspace:
+
+```sh
+cargo binstall presidio && presidio --desktop
+```
+
+The first command downloads the binary without compiling. The second downloads and verifies the Arch/Xfce workspace bundle, then registers Presidio in your applications menu. After setup, run `presidio` or open it from the menu.
+
 ### Viewer only (bring your own VNC server)
 
-For a manual install, Download the Linux x86-64 archive from the [GitHub release](https://github.com/BLig-Vox/presidio/releases/latest). Extract it to a permanent directory, then run `./presidio --desktop`.
+Use `presidio --viewer-desktop` to register just the viewer, or download and extract the standalone Linux binary from [GitHub Releases](https://github.com/BLig-Vox/presidio/releases/latest).
 
-**With Cargo Binstall:** If `cargo binstall` is not available, install the subcommand once:
-
-```sh
-cargo install cargo-binstall --locked
-cargo binstall --version
-```
-
-If Cargo still reports `no such command: binstall`, add Cargo’s bin directory to your `PATH` with `export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:$PATH"` and retry. To install Binstall itself without compiling, see the [official prebuilt installer](https://github.com/cargo-bins/cargo-binstall#quickly).
-
-Then install the prebuilt Presidio release and register the desktop launcher in one line:
-
-```sh
-cargo binstall --git https://github.com/BLig-Vox/presidio.git presidio && presidio --desktop
-```
-
-Presidio is not on crates.io yet. Once published there, the shorter command will be `cargo binstall presidio && presidio --desktop`.
-
-Open **Presidio** from your applications menu. The standalone app shows the 3D desk and can connect to your own VNC server:
+The viewer shows the 3D desk and can connect to your own VNC server:
 
 ```sh
 presidio --vnc 127.0.0.1:5900 --request-triple-layout
@@ -60,3 +62,4 @@ cargo run --locked
 ```
 
 Maintainers can run `scripts/package-release` for the binary archive or `scripts/package-release --workspace` to also package a prepared workspace runtime.
+Run **Build release workspace** from GitHub Actions on `main` with the `edge` channel to publish a prebuilt preview.

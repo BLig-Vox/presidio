@@ -335,19 +335,10 @@ fn draw_focused(texture: &Texture2D, source: Rect, aspect: f32) {
 mod desktop;
 
 fn config() -> Conf {
-    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--desktop")) {
-        #[cfg(target_os = "linux")]
-        let result = desktop::install();
-        #[cfg(not(target_os = "linux"))]
-        let result: std::io::Result<()> = Err(std::io::ErrorKind::Unsupported.into());
-
-        match result {
-            Ok(()) => std::process::exit(0),
-            Err(error) => {
-                eprintln!("Could not install the Presidio desktop entry: {error}");
-                std::process::exit(1);
-            }
-        }
+    #[cfg(target_os = "linux")]
+    if let Err(error) = desktop::handle_command() {
+        eprintln!("Presidio: {error}");
+        std::process::exit(1);
     }
     Conf {
         platform: macroquad::miniquad::conf::Platform {
