@@ -10,7 +10,17 @@ Presidio is a Rust desktop app. On Linux x86-64, the full workspace bundle runs 
 
 ## Quick start
 
-**App only:** Download the Linux x86-64 archive from the [GitHub release](https://github.com/BLig-Vox/presidio/releases/latest). Extract it to a permanent directory, then run `./presidio --desktop`.
+**Full workspace (Linux x86-64):** Install Presidio with its bundled Arch/Xfce desktop and three 1080p displays. No separate VNC server, Docker, Podman, or Cargo needed.
+
+```sh
+installer=$(curl -fsSL https://raw.githubusercontent.com/BLig-Vox/presidio/main/scripts/install-workspace) && bash -c "$installer"
+```
+
+Open **Presidio** from your applications menu. The workspace starts automatically and keeps your files between launches. The host must allow unprivileged user namespaces. See [Workspace setup](WORKSPACE.md) for details.
+
+### Viewer only (bring your own VNC server)
+
+For a manual install, Download the Linux x86-64 archive from the [GitHub release](https://github.com/BLig-Vox/presidio/releases/latest). Extract it to a permanent directory, then run `./presidio --desktop`.
 
 **With Cargo Binstall:** If `cargo binstall` is not available, install the subcommand once:
 
@@ -34,14 +44,6 @@ Open **Presidio** from your applications menu. The standalone app shows the 3D d
 ```sh
 presidio --vnc 127.0.0.1:5900 --request-triple-layout
 ```
-
-**Full Arch/Xfce workspace:** Download the workspace archive from the same release and extract it to a permanent directory, then run:
-
-```sh
-./presidio --desktop
-```
-
-The menu entry launches the bundled desktop when installed from this bundle. Your workspace home persists across launches. The full workspace needs Linux x86-64 and unprivileged user namespaces. See [Workspace setup](WORKSPACE.md) for technical details.
 
 ## Controls
 

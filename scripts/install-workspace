@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ $(uname -s) != Linux || $(uname -m) != x86_64 ]]; then
+    echo 'Presidio workspace currently supports Linux x86-64 only.' >&2
+    exit 1
+fi
+
+version=v0.1.0
+release=https://github.com/BLig-Vox/presidio/releases/download/$version
+asset=presidio-workspace-x86_64-unknown-linux-gnu-$version.tgz
+install_root=${XDG_DATA_HOME:-$HOME/.local/share}/presidio
+destination=$install_root/$version
+
+mkdir -p -- "$install_root"
+if [[ ! -d $destination ]]; then
+    staging=$(mktemp -d "$install_root/.install.XXXXXX")
+    trap 'rm -rf -- "$staging"' EXIT
+    echo "Downloading Presidio workspace ($version)..."
+    curl -fLSs "$release/$asset" | tar -xzf - -C "$staging"
+    test -x "$staging/presidio"
+    test -x "$staging/scripts/arch-oci"
+    test -s "$staging/runtime/linux-x86_64/arch-xfce.oci.tar"
+    mv -T -- "$staging" "$destination"
+fi
+
+"$destination/presidio" --desktop
+echo 'Open Presidio from your applications menu.'
