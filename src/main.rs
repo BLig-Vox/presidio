@@ -26,7 +26,7 @@ impl Monitor {
         self.width - 0.014
     }
 
-    fn distance_along(&self, eye: Vec3, direction: Vec3) -> Option<f32> {
+    fn intersect(&self, eye: Vec3, direction: Vec3) -> Option<(f32, Vec2)> {
         let inverse = Quat::from_rotation_y(-self.angle.to_radians());
         let origin = inverse * (eye - self.center);
         let direction = inverse * direction;
@@ -38,7 +38,10 @@ impl Monitor {
         (distance > 0.
             && hit.x.abs() <= self.panel_width() / 2.
             && hit.y.abs() <= PANEL_HEIGHT / 2.)
-            .then_some(distance)
+            .then_some((
+                distance,
+                vec2(0.5 + hit.x / self.panel_width(), 0.5 - hit.y / PANEL_HEIGHT),
+            ))
     }
 }
 
@@ -63,16 +66,72 @@ static MONITORS: [Monitor; 3] = [
     },
 ];
 
-fn monitor_at(direction: Vec3) -> Option<&'static Monitor> {
+fn monitor_hit(direction: Vec3) -> Option<(&'static Monitor, Vec2)> {
     MONITORS
         .iter()
         .filter_map(|monitor| {
             monitor
-                .distance_along(EYE, direction)
-                .map(|distance| (distance, monitor))
+                .intersect(EYE, direction)
+                .map(|(distance, uv)| (distance, monitor, uv))
         })
-        .min_by(|(a, _), (b, _)| a.total_cmp(b))
-        .map(|(_, monitor)| monitor)
+        .min_by(|(a, ..), (b, ..)| a.total_cmp(b))
+        .map(|(_, monitor, uv)| (monitor, uv))
+}
+
+fn monitor_at(direction: Vec3) -> Option<&'static Monitor> {
+    monitor_hit(direction).map(|(monitor, _)| monitor)
+}
+
+fn pointer_ray(direction: Vec3, mouse: Vec2) -> Vec3 {
+    let aspect = screen_width() / screen_height().max(1.);
+    let tangent = (HORIZONTAL_FOV.to_radians() / 2.).tan() / aspect.max(0.8);
+    let right = direction.cross(Vec3::Y).normalize();
+    let up = right.cross(direction);
+    direction
+        + right * ((2. * mouse.x / screen_width() - 1.) * tangent * aspect)
+        + up * ((1. - 2. * mouse.y / screen_height()) * tangent)
+}
+
+struct CameraLook {
+    yaw: f32,
+    pitch: f32,
+}
+
+impl Default for CameraLook {
+    fn default() -> Self {
+        Self {
+            yaw: 0.,
+            pitch: REST_PITCH,
+        }
+    }
+}
+
+impl CameraLook {
+    fn turn(&mut self, delta: Vec2) {
+        self.yaw = (self.yaw - delta.x * 0.003).clamp(-1.1, 1.1);
+        self.pitch = (self.pitch - delta.y * 0.003).clamp(-0.65, 0.65);
+    }
+
+    fn direction(&self) -> Vec3 {
+        vec3(
+            self.yaw.sin() * self.pitch.cos(),
+            self.pitch.sin(),
+            -self.yaw.cos() * self.pitch.cos(),
+        )
+    }
+}
+
+#[derive(Default)]
+struct CaptureControls {
+    super_keys: [bool; 2],
+    focus_held: bool,
+    drag: Option<Vec2>,
+}
+
+impl CaptureControls {
+    fn super_held(&self) -> bool {
+        self.super_keys.contains(&true)
+    }
 }
 
 fn rgb(r: u8, g: u8, b: u8) -> Color {
@@ -554,22 +613,29 @@ impl RemoteInput {
         for key in self.held_keys.drain() {
             connection.key(key, false);
         }
-        if let Some((x, y, _)) = self.pointer.take() {
-            connection.pointer(x, y, 0);
+        self.release_pointer(connection);
+    }
+
+    fn release_pointer(&mut self, connection: &vnc::Connection) {
+        if let Some((x, y, buttons)) = self.pointer.take() {
+            if buttons != 0 {
+                connection.pointer(x, y, 0);
+            }
         }
     }
 
     fn captured_pointer(
         &mut self,
         connection: &vnc::Connection,
-        source: Rect,
-        x: i32,
-        y: i32,
+        position: Option<(u16, u16)>,
         button: Option<(u32, bool)>,
     ) {
-        let bounds = focus_bounds(source.w / source.h);
-        let scale = screen_dpi_scale();
-        let (x, y) = Self::position(source, bounds, x as f32 / scale, y as f32 / scale);
+        let (x, y) = match (position, button, self.pointer) {
+            (Some(position), _, _) => position,
+            // A guest drag may end outside any of the rendered monitors.
+            (None, Some((1..=3, false)), Some((x, y, _))) => (x, y),
+            _ => return,
+        };
         let mut buttons = self.pointer.map_or(0, |(_, _, buttons)| buttons);
         match button {
             Some((button @ 1..=3, down)) => {
@@ -590,8 +656,15 @@ impl RemoteInput {
     }
 
     fn position(source: Rect, bounds: Rect, x: f32, y: f32) -> (u16, u16) {
-        let x = ((x - bounds.x) * source.w / bounds.w).clamp(0., source.w - 1.);
-        let y = ((y - bounds.y) * source.h / bounds.h).clamp(0., source.h - 1.);
+        Self::position_uv(
+            source,
+            vec2((x - bounds.x) / bounds.w, (y - bounds.y) / bounds.h),
+        )
+    }
+
+    fn position_uv(source: Rect, uv: Vec2) -> (u16, u16) {
+        let x = (uv.x * source.w).clamp(0., source.w - 1.);
+        let y = (uv.y * source.h).clamp(0., source.h - 1.);
         ((source.x + x) as u16, (source.y + y) as u16)
     }
 
@@ -691,8 +764,9 @@ async fn main() {
     let keyboard = register_input_subscriber();
     let mut focus_shortcut = FocusShortcut::default();
     let mut input = RemoteInput::default();
-    let (mut yaw, mut pitch) = (0.0_f32, REST_PITCH);
-    let mut previous: Option<(f32, f32)> = None;
+    let mut camera = CameraLook::default();
+    let mut previous = None;
+    let mut controls = CaptureControls::default();
 
     loop {
         let update = updates
@@ -736,31 +810,22 @@ async fn main() {
             }
             None => {}
         }
-        let mouse = mouse_position();
+        let mouse = Vec2::from(mouse_position());
         let super_held = is_key_down(KeyCode::LeftSuper) || is_key_down(KeyCode::RightSuper);
-        let look = focused.is_none()
-            && prompt.is_none()
-            && super_held
-            && is_mouse_button_down(MouseButton::Right);
-        if look {
-            if let Some((x, y)) = previous {
-                yaw = (yaw - (mouse.0 - x) * 0.003).clamp(-1.1, 1.1);
-                pitch = (pitch - (mouse.1 - y) * 0.003).clamp(-0.65, 0.65);
+        let desk_mode = capture.is_none() && focused.is_none() && prompt.is_none();
+        if desk_mode && super_held && is_mouse_button_down(MouseButton::Right) {
+            if let Some(last) = previous {
+                camera.turn(mouse - last);
             }
             previous = Some(mouse);
         } else {
             previous = None;
         }
-        if focused.is_none() && prompt.is_none() && is_key_pressed(KeyCode::Home) {
-            yaw = 0.;
-            pitch = REST_PITCH;
+        if desk_mode && is_key_pressed(KeyCode::Home) {
+            camera = CameraLook::default();
         }
 
-        let direction = vec3(
-            yaw.sin() * pitch.cos(),
-            pitch.sin(),
-            -yaw.cos() * pitch.cos(),
-        );
+        let direction = camera.direction();
         // Use the event's modifiers so a quick tap still works between frames.
         repeat_all_miniquad_input(&mut focus_shortcut, keyboard);
         let toggled = std::mem::take(&mut focus_shortcut.triggered);
@@ -793,14 +858,7 @@ async fn main() {
                 && is_mouse_button_pressed(MouseButton::Left)
             {
                 capture_error = None;
-                let aspect = screen_width() / screen_height().max(1.);
-                let tangent = (HORIZONTAL_FOV.to_radians() / 2.).tan() / aspect.max(0.8);
-                let right = direction.cross(Vec3::Y).normalize();
-                let up = right.cross(direction);
-                let ray = direction
-                    + right * ((2. * mouse.0 / screen_width() - 1.) * tangent * aspect)
-                    + up * ((1. - 2. * mouse.1 / screen_height()) * tangent);
-                let monitor = monitor_at(ray)
+                let monitor = monitor_at(pointer_ray(direction, mouse))
                     .or_else(|| monitor_at(direction))
                     .unwrap_or(&MONITORS[1]);
                 if panel_source(monitor, &panorama, live.as_ref()).is_some() {
@@ -814,15 +872,72 @@ async fn main() {
                 .filter(|_| live.is_some())
                 .and_then(|monitor| panel_source(monitor, &panorama, live.as_ref()));
             if let Some(grab) = &capture {
-                let mut release = source.is_none();
-                if let Some(source) = source {
+                let mut release = live.is_none();
+                if !release {
                     for event in grab.events() {
                         match event {
+                            capture::Event::Key(symbol @ (0xffeb | 0xffec), down) => {
+                                controls.super_keys[(symbol - 0xffeb) as usize] = down;
+                            }
+                            capture::Event::Key(symbol @ (0xff0d | 0xff8d), down)
+                                if controls.focus_held
+                                    || (down
+                                        && controls.super_held()
+                                        && !input.held_keys.contains(&symbol)) =>
+                            {
+                                if down && !controls.focus_held && controls.drag.is_none() {
+                                    input.release_pointer(connection);
+                                    focused = if focused.is_some() {
+                                        None
+                                    } else {
+                                        monitor_at(camera.direction()).filter(|monitor| {
+                                            panel_source(monitor, &panorama, live.as_ref())
+                                                .is_some()
+                                        })
+                                    };
+                                }
+                                controls.focus_held = down;
+                            }
+                            capture::Event::Key(0xff50, true) if focused.is_none() => {
+                                camera = CameraLook::default();
+                            }
                             capture::Event::Key(symbol, down) => {
-                                input.key(connection, symbol, down)
+                                input.key(connection, symbol, down);
                             }
                             capture::Event::Pointer(x, y, button) => {
-                                input.captured_pointer(connection, source, x, y, button)
+                                let mouse = vec2(x as f32, y as f32) / screen_dpi_scale();
+                                if let Some(last) = controls.drag {
+                                    camera.turn(mouse - last);
+                                    // Own this drag through right-button release, even if Super
+                                    // is released first. Never start a guest right click midway.
+                                    controls.drag = (button != Some((3, false))).then_some(mouse);
+                                } else if button == Some((3, true)) && controls.super_held() {
+                                    input.release_pointer(connection);
+                                    focused = None;
+                                    controls.drag = Some(mouse);
+                                } else {
+                                    let position = if let Some(monitor) = focused {
+                                        panel_source(monitor, &panorama, live.as_ref()).map(
+                                            |source| {
+                                                let bounds = focus_bounds(source.w / source.h);
+                                                RemoteInput::position(
+                                                    source, bounds, mouse.x, mouse.y,
+                                                )
+                                            },
+                                        )
+                                    } else {
+                                        monitor_hit(pointer_ray(camera.direction(), mouse))
+                                            .and_then(|(monitor, uv)| {
+                                                let source = panel_source(
+                                                    monitor,
+                                                    &panorama,
+                                                    live.as_ref(),
+                                                )?;
+                                                Some(RemoteInput::position_uv(source, uv))
+                                            })
+                                    };
+                                    input.captured_pointer(connection, position, button);
+                                }
                             }
                             capture::Event::Failed(error) => {
                                 capture_error = Some(error);
@@ -838,6 +953,7 @@ async fn main() {
                 }
                 if release {
                     capture = None;
+                    controls = CaptureControls::default();
                     focused = None;
                     input.release(connection);
                 }
@@ -853,7 +969,18 @@ async fn main() {
         focus_shortcut.clicks.clear();
         focus_shortcut.scroll = 0;
 
-        let hint = if let Some(monitor) = focused {
+        let hint = if capture.as_ref().is_some_and(capture::Capture::pending) {
+            "Waiting for Wayland to grant capture   |   Super + Esc to cancel"
+        } else if capture.is_some() {
+            "Captured   |   Super + right-drag to look   |   Super + Enter to toggle monitor view   |   Super + Esc to release"
+        } else if focused.is_some() {
+            "Super + Enter to return to desk"
+        } else if live.is_some() {
+            "Click to capture input   |   Super + right-drag to look   |   Super + Enter to focus only"
+        } else {
+            "Super + right-drag to look   |   Super + Enter to focus   |   Home to recenter"
+        };
+        if let Some(monitor) = focused {
             clear_background(BLACK);
             let source = panel_source(monitor, &panorama, live.as_ref()).unwrap();
             let (texture, aspect) = live
@@ -862,20 +989,13 @@ async fn main() {
                     (&live.texture, source.w / source.h)
                 });
             draw_focused(texture, source, aspect);
-            if capture.as_ref().is_some_and(capture::Capture::pending) {
-                "Waiting for Wayland to grant capture   |   Super + Esc to cancel"
-            } else if capture.is_some() {
-                "Keyboard and mouse captured   |   Super + Esc to release"
-            } else {
-                "Super + Enter to return to desk"
-            }
         } else {
             clear_background(rgb(32, 30, 29));
             let aspect = screen_width() / screen_height().max(1.);
             let fovy = 2. * ((HORIZONTAL_FOV.to_radians() / 2.).tan() / aspect.max(0.8)).atan();
             set_camera(&Camera3D {
                 position: EYE,
-                target: EYE + direction,
+                target: EYE + camera.direction(),
                 up: Vec3::Y,
                 fovy,
                 z_near: 0.03,
@@ -887,12 +1007,7 @@ async fn main() {
             }
             draw_mesh(&screens);
             set_default_camera();
-            if live.is_some() {
-                "Click to capture input   |   Super + right-drag to look   |   Super + Enter to focus only"
-            } else {
-                "Super + right-drag to look   |   Super + Enter to focus   |   Home to recenter"
-            }
-        };
+        }
         let hint = capture_error.map(str::to_owned).unwrap_or_else(|| {
             vnc_status.as_ref().map_or_else(
                 || hint.to_owned(),
@@ -925,6 +1040,17 @@ mod tests {
         assert_eq!(keysym(KeyCode::A), Some(u32::from(b'a')));
         assert_eq!(keysym(KeyCode::Backspace), Some(0xff08));
         assert_eq!(keysym(KeyCode::LeftSuper), None);
+    }
+
+    #[test]
+    fn captured_desk_pointer_maps_to_the_live_monitor_offset() {
+        let monitor = &MONITORS[2];
+        let direction = (monitor.center + vec3(0., PANEL_HEIGHT / 4., 0.) - EYE).normalize();
+        let (hit, uv) = monitor_hit(direction).unwrap();
+        assert!(std::ptr::eq(hit, monitor));
+        let (x, y) = RemoteInput::position_uv(Rect::new(3840., 0., 1920., 1080.), uv);
+        assert!((4700..4800).contains(&x));
+        assert!((260..300).contains(&y));
     }
 
     #[test]

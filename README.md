@@ -51,11 +51,14 @@ presidio --vnc 127.0.0.1:5900 --request-triple-layout
 
 | Control | Action |
 | --- | --- |
-| Super + right-drag | Look around the desk |
+| Super + right-drag | Look around the desk, even while input is captured |
 | Click the live desk, then choose **Yes, capture** | Focus a monitor and give Presidio exclusive keyboard and mouse input (Linux X11 and compatible native Wayland compositors, including Hyprland) |
 | Super + Esc | Release captured input back to the host and return to the desk |
-| Super + Enter | Focus a monitor without grabbing host input, or return to the desk |
-| Home | Recenter your view |
+| Super + Enter | Toggle between the desk and the monitor you’re looking at, without changing capture |
+| Home | Recenter your view in desk mode |
+
+While captured, Presidio handles these shortcuts locally. Ordinary typing and
+mouse input still go to the VNC guest, including clicks on the 3D monitors.
 
 On Wayland, capture requires compositor support for pointer confinement and
 keyboard shortcut inhibition. Presidio also requests an exclusive focus grab on
