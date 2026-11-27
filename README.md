@@ -12,12 +12,13 @@ Presidio is a Rust desktop app. On Linux x86-64, the full workspace bundle runs 
 
 **App only:** Download the Linux x86-64 archive from the [GitHub release](https://github.com/BLig-Vox/presidio/releases/latest). Extract it to a permanent directory, then run `./presidio --desktop`.
 
-Or use Cargo Binstall to fetch the same GitHub binary without compiling:
+If you have [Cargo Binstall](https://github.com/cargo-bins/cargo-binstall), install the prebuilt GitHub release and register the desktop launcher in one line:
 
 ```sh
-cargo binstall --git https://github.com/BLig-Vox/presidio.git presidio
-presidio --desktop
+cargo binstall --git https://github.com/BLig-Vox/presidio.git presidio && presidio --desktop
 ```
+
+Presidio is not on crates.io yet. Once published there, the shorter command will be `cargo binstall presidio && presidio --desktop`.
 
 Open **Presidio** from your applications menu. The standalone app shows the 3D desk and can connect to your own VNC server:
 
