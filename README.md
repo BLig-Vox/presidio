@@ -12,7 +12,16 @@ Presidio is a Rust desktop app. On Linux x86-64, the full workspace bundle runs 
 
 **App only:** Download the Linux x86-64 archive from the [GitHub release](https://github.com/BLig-Vox/presidio/releases/latest). Extract it to a permanent directory, then run `./presidio --desktop`.
 
-If you have [Cargo Binstall](https://github.com/cargo-bins/cargo-binstall), install the prebuilt GitHub release and register the desktop launcher in one line:
+**With Cargo Binstall:** If `cargo binstall` is not available, install the subcommand once:
+
+```sh
+cargo install cargo-binstall --locked
+cargo binstall --version
+```
+
+If Cargo still reports `no such command: binstall`, add Cargo’s bin directory to your `PATH` with `export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:$PATH"` and retry. To install Binstall itself without compiling, see the [official prebuilt installer](https://github.com/cargo-bins/cargo-binstall#quickly).
+
+Then install the prebuilt Presidio release and register the desktop launcher in one line:
 
 ```sh
 cargo binstall --git https://github.com/BLig-Vox/presidio.git presidio && presidio --desktop
